@@ -68,6 +68,7 @@ export default function VoiceRoom({
 }: VoiceRoomProps) {
   const trtcRef = useRef<InstanceType<typeof TRTC_Cloud> | null>(null)
   const permRef = useRef<VoicePerm>(perm)
+  const phaseRef = useRef<VoicePhase>(phase)
   /** 本地手动开关（仅服务端 canSpeak=true 时有效；canSpeak=false 强制闭麦） */
   const micOnRef = useRef(false)
   const [micOn, setMicOn] = useState(false)
@@ -81,6 +82,7 @@ export default function VoiceRoom({
     const trtc = trtcRef.current
     if (!trtc) return
     const can = permRef.current.canSpeak && micOnRef.current
+    console.log('[TRTC] 本地麦 muteLocalAudio=', !can, 'canSpeak=', permRef.current.canSpeak, 'micOn=', micOnRef.current)
     void trtc.muteLocalAudio(!can)
   }, [])
 
@@ -89,7 +91,11 @@ export default function VoiceRoom({
     const trtc = trtcRef.current
     if (!trtc) return
     const hear = new Set(permRef.current.hearUserIds)
+    console.log('[TRTC] 远端权限 hear=', [...hear], 'remoteUsers=', [...remoteUsersRef.current])
+    const free = phaseRef.current === 'waiting' || phaseRef.current === 'over' || phaseRef.current === 'lobby'
     for (const uid of remoteUsersRef.current) {
+      // 自由麦阶段（大厅/赛后）全员互听，直接放音，不受 hearUserIds 时序影响
+      if (free) { void trtc.muteRemoteAudio(uid, false); continue }
       void (hear.has(uid)
         ? trtc.muteRemoteAudio(uid, false)
         : trtc.muteRemoteAudio(uid, true))
@@ -104,27 +110,14 @@ export default function VoiceRoom({
     applyLocalMute()
   }, [applyLocalMute])
 
-  /** PTT 按住说话（大厅/游戏结束后）：按住开麦，松开闭麦 */
-  const pttDown = useCallback(() => {
-    if (!ready || !permRef.current.canSpeak) return
-    micOnRef.current = true
-    setMicOn(true)
-    applyLocalMute()
-  }, [ready, applyLocalMute])
-  const pttUp = useCallback(() => {
-    micOnRef.current = false
-    setMicOn(false)
-    applyLocalMute()
-  }, [applyLocalMute])
-
   // 服务端单播权限变化 -> 立即生效；服务端权威决定本地开关：
-  // canSpeak=true 自动开麦（轮到/获准发言即解除静音）；false 强制闭麦并复位本地开关。
-  // 大厅/结束后（freeMic）改"按住说话"：默认闭麦，按住才开麦（避免环境噪音串入复盘）
+  // canSpeak=true 即默认开麦（赛前/赛后自由麦进房就能直接说话，无需点按钮；轮到发言同样自动开麦）；
+  // canSpeak=false 强制闭麦并复位本地开关。canSpeak=true 时玩家仍可用大按钮手动关/开自己的麦。
   useEffect(() => {
     permRef.current = perm
-    const pttMode = phase === 'waiting' || phase === 'over'
-    micOnRef.current = pttMode ? false : perm.canSpeak
-    setMicOn(micOnRef.current)
+    phaseRef.current = phase
+    micOnRef.current = perm.canSpeak
+    setMicOn(perm.canSpeak)
     applyLocalMute()
     applyRemoteMutes()
   }, [perm, phase, applyLocalMute, applyRemoteMutes])
@@ -140,6 +133,7 @@ export default function VoiceRoom({
     trtcRef.current = trtc
 
     const onRemoteEnter = (uid: string) => {
+      console.log('[TRTC] ★远端进房 uid=', uid)
       remoteUsersRef.current.add(uid)
       // 远端刚进房时立刻按当前权限静音，避免串音
       applyRemoteMutes()
@@ -149,7 +143,8 @@ export default function VoiceRoom({
     }
     const onUserAudioAvailable = (uid: string, available: boolean) => {
       if (available) {
-        remoteUsersRef.current.add(uid)
+        console.log('[TRTC] ★远端进房 uid=', uid)
+      remoteUsersRef.current.add(uid)
         applyRemoteMutes()
       }
     }
@@ -159,6 +154,9 @@ export default function VoiceRoom({
     trtc.on('onUserAudioAvailable', onUserAudioAvailable)
 
     const start = async () => {
+      // 显式锁定：自动接收远端音频、不接收视频（语音房），避免部分浏览器远端音频不订阅
+      await trtc.setDefaultStreamRecvMode(true, false)
+      console.log('[TRTC] 进房 sdkAppId=', sdkAppId, 'userId=', userId, 'roomId=', toTrtcRoomId(gameRoomId))
       await trtc.enterRoom(
         {
           sdkAppId,
@@ -173,9 +171,9 @@ export default function VoiceRoom({
       )
       if (cancelled) return
       await trtc.startLocalAudio()
-      // 进房后按当前权限设置麦克风与远端静音（大厅/结束后走 PTT：默认闭麦，按住说话）
-      micOnRef.current =
-        permRef.current.canSpeak && phase !== 'waiting' && phase !== 'over'
+      console.log('[TRTC] 本地麦克风采集已启动')
+      // 进房后按当前权限设置麦克风与远端静音（canSpeak=true 即默认开麦，含赛前/赛后自由麦）
+      micOnRef.current = permRef.current.canSpeak
       setMicOn(micOnRef.current)
       applyLocalMute()
       applyRemoteMutes()
@@ -226,10 +224,12 @@ export default function VoiceRoom({
   const wolfNight = isAlive && phase === 'night' && isWolf
   const goodNight = isAlive && phase === 'night' && !isWolf
   const dead = !isAlive
-  const freeMic = phase === 'waiting' || phase === 'over'
+  const freeMic = phase === 'waiting' || phase === 'over' || phase === 'lobby'
 
   const statusText = freeMic
-    ? '🎙 按住说话（按住开麦，松开闭麦）'
+    ? micOn && perm.canSpeak
+      ? '🎤 麦克风已开启（自由发言）'
+      : '🎤 麦克风已关闭'
     : dead
       ? '💀 死亡频道麦（仅死者可听）'
       : myTurn
@@ -237,71 +237,46 @@ export default function VoiceRoom({
         : waitingTurn
           ? `🎤 等待 ${currentSpeaker} 号发言（已自动闭麦）`
           : wolfNight
-            ? '🐺 狼人频道麦（点击说话）'
+            ? '🐺 狼人频道麦（可开关）'
             : goodNight
               ? '🌙 黑夜请闭眼'
               : '🎤 麦克风待命'
 
   return (
-    <div className="rounded-xl border border-sky-500/30 bg-sky-500/10 px-2.5 py-1 text-xs text-sky-100">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="font-bold">实时语音：</span>
-        <span data-testid="mic-status">{statusText}</span>
-        {freeMic ? (
-          <button
-            type="button"
-            data-testid="ptt-press"
-            onPointerDown={pttDown}
-            onPointerUp={pttUp}
-            onPointerLeave={pttUp}
-            onPointerCancel={pttUp}
-            onContextMenu={(e) => e.preventDefault()}
-            disabled={!ready || !perm.canSpeak}
-            className="touch-none select-none rounded-md bg-emerald-500/30 px-3 py-0.5 font-bold text-emerald-200 active:bg-emerald-500/60"
-          >
-            🎙 按住说话
-          </button>
-        ) : (
-          <button
-            type="button"
-            data-testid="mic-toggle"
-            onClick={toggleMic}
-            disabled={!ready || !perm.canSpeak}
-            className={`rounded-md px-2 py-0.5 font-bold ${
-              micOn && perm.canSpeak
-                ? 'bg-emerald-500/30 text-emerald-200'
-                : 'bg-slate-600/40 text-slate-300'
-            }`}
-          >
-            {micOn && perm.canSpeak ? '🎤 麦克风开' : '🔇 已闭麦'}
-          </button>
-        )}
-        {myTurn && (
-          <button
-            type="button"
-            data-testid="end-speak"
-            onClick={onTalkDone}
-            className="rounded-md bg-rose-500/30 px-2 py-0.5 font-bold text-rose-200"
-          >
-            🎤 结束发言
-          </button>
-        )}
+    <div className="border-t border-sky-500/30 bg-slate-900/95 px-3 pt-2 pb-[max(8px,env(safe-area-inset-bottom))] backdrop-blur">
+      <div className="mx-auto flex w-full max-w-[480px] items-center gap-2">
+        <span data-testid="mic-status" className="flex-1 text-xs font-bold text-sky-100">
+          {statusText}
+        </span>
+        <button
+          type="button"
+          data-testid="mic-toggle"
+          onClick={toggleMic}
+          disabled={!ready || !perm.canSpeak}
+          className={`shrink-0 rounded-xl px-4 py-2 text-sm font-black transition active:scale-95 disabled:cursor-not-allowed ${
+            micOn && perm.canSpeak
+              ? 'bg-emerald-500 text-slate-950 shadow-lg shadow-emerald-500/30'
+              : 'bg-slate-700 text-slate-300'
+          }`}
+        >
+          {micOn && perm.canSpeak ? '🎤 开麦中' : '🔇 已闭麦'}
+        </button>
         {canInterrupt && (
           <button
             type="button"
             data-testid="sheriff-interrupt"
             onClick={onSheriffInterrupt}
-            className="rounded-md bg-amber-500/30 px-2 py-0.5 font-bold text-amber-200"
+            className="shrink-0 rounded-xl bg-amber-500 px-3 py-2 text-sm font-black text-slate-950 transition active:scale-95"
           >
-            👑 抢先发言
+            👑 抢麦
           </button>
         )}
       </div>
-        {errorText && (
-          <div className="mt-1 opacity-80">
+      {errorText && (
+        <div className="mx-auto mt-1 max-w-[480px] text-[11px] leading-tight text-rose-300">
           连接失败：{errorText}
-          </div>
-        )}
+        </div>
+      )}
     </div>
   )
 }

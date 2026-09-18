@@ -17,11 +17,15 @@ function CreateRoom() {
   }
 
   const createRoom = () => {
+    if (!nickname.trim()) {
+      alert("请先输入你的昵称，再创建房间")
+      return
+    }
     const code = Math.random().toString(36).slice(2, 8).toUpperCase()
     const board =
       boardOptions.find((item) => item.name === boardName) ?? customBoard
     const query = new URLSearchParams({
-      nickname: nickname.trim() || '玩家',
+      nickname: nickname.trim(),
       players: String(playerCount),
       board: JSON.stringify(board),
     })
@@ -60,15 +64,16 @@ function CreateRoom() {
           </label>
 
           <label className="flex flex-col gap-2">
-            <span className="text-sm font-medium text-slate-300">我的昵称</span>
+            <span className="text-sm font-medium text-slate-300">我的昵称 <span className="text-rose-400">*必填</span></span>
             <input
               type="text"
               value={nickname}
               onChange={(event) => setNickname(event.target.value)}
               maxLength={6}
-              placeholder="请输入昵称（最多6个字）"
+              placeholder="必填：请输入昵称（最多6个字）"
               className="w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-base text-slate-100 placeholder-slate-500 outline-none transition focus:border-amber-500"
             />
+            <span className="text-xs text-rose-400">必须填写昵称，否则无法创建房间</span>
           </label>
 
           <label className="flex flex-col gap-2">
@@ -89,7 +94,8 @@ function CreateRoom() {
           <button
             type="button"
             onClick={createRoom}
-            className="mt-2 w-full rounded-2xl bg-amber-500 py-4 text-lg font-bold text-slate-950 shadow-lg shadow-amber-500/30 transition active:scale-95"
+            disabled={!nickname.trim()}
+            className="mt-2 w-full rounded-2xl bg-amber-500 py-4 text-lg font-bold text-slate-950 shadow-lg shadow-amber-500/30 transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
           >
             创建房间
           </button>

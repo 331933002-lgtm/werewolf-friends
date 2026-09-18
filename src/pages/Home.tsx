@@ -17,7 +17,7 @@ function Home() {
         'bg-emerald-500 text-slate-950 shadow-emerald-500/30 active:scale-95',
     },
     {
-      label: '测试环境',
+      label: '线下法官助手',
       path: '/room/demo',
       className: 'bg-slate-700 text-slate-100 shadow-slate-900/40 active:scale-95',
     },
@@ -37,7 +37,7 @@ function Home() {
           901线上狼人杀
         </h1>
         <p className="mt-4 text-sm text-slate-200 drop-shadow-[0_1px_6px_rgba(0,0,0,0.95)]">
-          天黑请闭眼，和朋友一起开局
+          白天好姐妹，晚上刀姐妹
         </p>
       </header>
 

@@ -47,6 +47,8 @@ export interface SavedGame {
   exileHasLastWords: boolean | null
   /** 白天操作记录（放逐/遗言/开枪/平票），跨天累计用于复盘 */
   dayLog: string[]
+  /** 线下法官助手：累计出局座位（夜间死讯/放逐/开枪），用于操作按钮过滤 */
+  graveyard?: number[]
 }
 
 /**
@@ -86,7 +88,7 @@ export const NIGHT_STEPS: NightStepConfig[] = [
     prompt: ROLE_DESCRIPTIONS['nightmare'],
     needTarget: true,
     targetCount: 1,
-    canSkip: false,
+    canSkip: true,
   },
   {
     key: 'dream_weaver',
@@ -94,7 +96,7 @@ export const NIGHT_STEPS: NightStepConfig[] = [
     prompt: ROLE_DESCRIPTIONS['dream_weaver'],
     needTarget: true,
     targetCount: 1,
-    canSkip: false,
+    canSkip: true,
   },
   {
     key: 'wolf_queen',
@@ -174,7 +176,7 @@ export const NIGHT_STEPS: NightStepConfig[] = [
     prompt: ROLE_DESCRIPTIONS['wolf_witch'],
     needTarget: true,
     targetCount: 1,
-    canSkip: false,
+    canSkip: true,
   },
 ]
 

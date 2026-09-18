@@ -414,10 +414,10 @@ export default class GameServer {
         const nickname = msg.nickname?.trim() || '玩家';
         const existing = room.players.get(msg.playerId);
         // 入座即分配座位号（1..12 最小空位）；重进沿用原座位；发牌时座位不再变化
-        const seat = existing?.seat ?? this.nextFreeSeat(room);
-        // 固定头像：进房即由服务端分配（1..12 房间内不重复），刷新/换座均保持不变，所有玩家视角一致
-        const avatarIdx = existing?.avatarIdx ?? this.nextFreeAvatar(room);
-        room.players.set(msg.playerId, { nickname, ready: existing?.ready ?? false, seat, avatarIdx });
+        const isSpectator = !!msg.spectator;
+        const seat = isSpectator ? null : (existing?.seat ?? this.nextFreeSeat(room));
+        const avatarIdx = isSpectator ? null : (existing?.avatarIdx ?? this.nextFreeAvatar(room));
+        room.players.set(msg.playerId, { nickname, ready: existing?.ready ?? false, seat, avatarIdx, isSpectator });
         room.connToPlayer.set(sender.id, msg.playerId);
         room.playerConns.set(msg.playerId, sender.id);
         if (room.hostPlayerId === null) {
@@ -428,7 +428,9 @@ export default class GameServer {
         this.sendToPlayer(room, msg.playerId, {
             type: 'trtcCredential',
             trtc: { sdkAppId: TRTC_SDK_APP_ID, userSig: createTrtcUserSig(msg.playerId) },
-            voicePerm: { canSpeak: true, canHearWolves: false, isDeadChannel: false, hearUserIds: [] },
+            voicePerm: isSpectator
+                ? { canSpeak: false, canHearWolves: false, isDeadChannel: true, hearUserIds: [] }
+                : { canSpeak: true, canHearWolves: false, isDeadChannel: false, hearUserIds: [] },
         });
         this.updateLobbyVoicePerms(room);
     }
@@ -533,7 +535,7 @@ export default class GameServer {
                 deck.push({ key: role.key, name: role.name, camp: role.camp ?? 'good' });
             }
         }
-        const playerList = [...room.players.entries()];
+        const playerList = [...room.players.entries()].filter(([, info]) => info.seat != null);
         if (playerList.length === 0) {
             sender.send(JSON.stringify({ type: 'error', message: '房间里还没有玩家' }));
             return;
@@ -781,7 +783,7 @@ export default class GameServer {
                 deck.push({ key: role.key, name: role.name, camp: role.camp ?? 'good' });
             }
         }
-        const playerList = [...room.players.entries()];
+        const playerList = [...room.players.entries()].filter(([, info]) => info.seat != null);
         if (playerList.length === 0) {
             sender.send(JSON.stringify({ type: 'error', message: '房间里已没有玩家' }));
             return;
@@ -2943,6 +2945,21 @@ export default class GameServer {
                 currentPhase: gs.currentPhase,
                 currentSpeaker: gs.speakerOrder[gs.speakerIndex] ?? null,
                 ...perm,
+            });
+        }
+        // 观战者：始终死亡频道，只听不说（参考已淘汰玩家听取语音）
+        for (const [pid, info] of room.players.entries()) {
+            if (!info.isSpectator) continue;
+            this.sendToPlayer(room, pid, {
+                type: 'voicePerm',
+                phase: gs.phase,
+                dayStage: gs.dayStage,
+                currentPhase: gs.currentPhase,
+                currentSpeaker: gs.speakerOrder[gs.speakerIndex] ?? null,
+                canSpeak: false,
+                canHearWolves: false,
+                isDeadChannel: true,
+                hearUserIds: gs.seats.filter((s) => gs.deadSeats.includes(s.seat)).map((s) => s.playerId),
             });
         }
     }

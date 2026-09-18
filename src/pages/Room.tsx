@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams, useNavigate } from 'react-router-dom'
 import VoiceRoom from '../VoiceRoom'
 
 /** 随机搞笑头像池（12 张，位于 public/avatars），游戏开始后随机分发给各座位 */
 // 头像由服务端统一分配 avatarIdx（1..12），前端拼 URL：/avatars/avatar-01.jpg … avatar-12.jpg
 import RoleActionPanel from '../components/RoleActionPanel'
 import { boards, type Board, type Camp } from '../data/boards'
+import { ROLES } from '../data/roles'
 import {
   EMPTY_VOICE_PERM,
   createRoomSocket,
@@ -29,6 +30,7 @@ import {
   type NightAction,
   type NightStepConfig,
   type SavedGame,
+  type SeatRole,
 } from '../game/game'
 
 type WitchChoice = 'heal' | 'poison' | 'none' | null
@@ -37,6 +39,25 @@ const CAMP_LABEL: Record<Camp, string> = {
   wolf: '狼人阵营',
   good: '好人阵营',
   third: '第三方阵营',
+}
+
+/** 线下法官助手：每个夜间步骤的一句话操作提示（完整技能说明见"查看角色"，面板不展示长文） */
+const JUDGE_STEP_HINTS: Record<string, string> = {
+  lonely_girl: '首夜选择 1 名玩家作为追崇偶像',
+  cupid: '依次选择 2 名玩家成为情侣',
+  lovers: '请情侣睁眼，只确认彼此号码',
+  nightmare: '选择 1 名玩家恐惧（可空过则跳过）',
+  dream_weaver: '选择 1 名玩家梦游',
+  wolf_queen: '选择 1 名玩家封锁，也可不使用',
+  werewolf: '选择今晚要刀的 1 名玩家',
+  witch: '选择解药救人、毒药杀人或不用药',
+  seer: '选择 1 名玩家查验身份',
+  raven: '选择 1 名玩家诅咒（禁言+1票），可跳过',
+  hunter: '猎人夜间确认（被刀/被放逐才可开枪）',
+  demon_hunter: '第二晚起，选择 1 名玩家狩猎，可跳过',
+  wolf_king: '狼王夜间确认（被刀/被放逐可开枪）',
+  cursed_fox: '咒狐无夜间行动，直接下一步',
+  wolf_witch: '选择 1 名玩家查验具体身份',
 }
 
 const EMPTY_GAME: SavedGame = {
@@ -55,7 +76,9 @@ const EMPTY_GAME: SavedGame = {
 function Room() {
   const { roomId } = useParams<{ roomId: string }>()
   const [searchParams] = useSearchParams()
-  const nickname = searchParams.get('nickname') || '玩家'
+  const nickname = searchParams.get('nickname') || ''
+  const spectatorMode = searchParams.get('spectator') === '1'
+  const navigate = useNavigate()
 
   // 从 URL 中解析创建/加入时传入的板子数据
   const boardParam = searchParams.get('board')
@@ -70,10 +93,16 @@ function Room() {
 
   const seatCount = currentBoard.playerCount
   const isDemo = roomId === 'demo'
+  // 强制昵称：无昵称直接回首页（线下法官助手 demo 不强制）
+  useEffect(() => {
+    if (!isDemo && !nickname.trim()) navigate('', { replace: true })
+  }, [nickname, isDemo, navigate])
   const roleList = currentBoard.roles.map((role) => role.name).join('、')
 
   // 游戏状态：优先从本地恢复（刷新后继续主持），旧存档自动补齐白天字段
   const [game, setGame] = useState<SavedGame>(() => {
+    // 线下法官助手：不恢复上次牌局，每次进入都从手动配牌开始
+    if (roomId === 'demo') return { ...EMPTY_GAME }
     const saved = loadSavedGame(roomId ?? '')
     if (saved && saved.deal.length === currentBoard.playerCount) {
       return { ...EMPTY_GAME, ...saved }
@@ -85,6 +114,8 @@ function Room() {
   const [witchChoice, setWitchChoice] = useState<WitchChoice>(null)
   const [voteSeat, setVoteSeat] = useState<number | null>(null)
   const [gunArming, setGunArming] = useState(false)
+  /** 线下法官助手：撤回历史栈，每一步改变游戏状态前快照旧状态，可连续撤回直至开局 */
+  const [gameHistory, setGameHistory] = useState<SavedGame[]>([])
   const [showRecap, setShowRecap] = useState(false)
 
   // ---- WebSocket 房间连接（第一阶段：玩家列表实时同步） ----
@@ -94,6 +125,8 @@ function Room() {
   const [connState, setConnState] = useState<
     'connecting' | 'open' | 'closed'
   >('connecting')
+  /** 断线自动重连计数：变化时重新建立 WebSocket 并重新 join（服务端按 playerId 沿用原座位） */
+  const [reconnectTick, setReconnectTick] = useState(0)
 
   // ---- 第二阶段第一步：服务端发牌与身份私密查看 ----
   const [hostPlayerId, setHostPlayerId] = useState<string | null>(null)
@@ -104,6 +137,11 @@ function Room() {
   /** 开发者模式（房主连续点击房间码 5 次，或长按顶部"房间"标题开启）：
    *  默认玩家界面完全隐藏测试功能，保持随机发牌；非房主触发完全无反应 */
   const [devMode, setDevMode] = useState(false)
+  /** 线下法官助手：法官手动配牌（seat -> roleKey）与当前正在选角色的号码 */
+  const [judgeAssign, setJudgeAssign] = useState<Record<number, string>>({})
+  const [judgePickSeat, setJudgePickSeat] = useState<number | null>(null)
+  /** 法官流程：行动记录弹层 */
+  const [showJudgeLog, setShowJudgeLog] = useState(false)
   const [copied, setCopied] = useState(false)
   // 连续点击房间码计数（仅房主累计）
   const devTapCount = useRef(0)
@@ -183,7 +221,7 @@ function Room() {
   /** 板子角色列表折叠开关（默认折叠，点击展开，压缩首屏长度） */
   const [showBoardRoles, setShowBoardRoles] = useState(false)
   /** 已发牌座位表折叠开关（游戏开始后默认收起，把屏幕让给游戏主信息；点击展开查看座位） */
-  const [showDealtSeats, setShowDealtSeats] = useState(true)
+  const [showDealtSeats, setShowDealtSeats] = useState(false)
   const [voicePerm, setVoicePerm] = useState<VoicePerm>(EMPTY_VOICE_PERM)
   /** 大厅语音凭证（服务端 join 后下发；开局后以 role 帧 trtc 为准） */
   const [trtcCred, setTrtcCred] = useState<{ sdkAppId: number; userSig: string } | null>(null)
@@ -333,19 +371,27 @@ function Room() {
 
   // 每次状态变化自动持久化
   useEffect(() => {
+    // 线下法官助手为临时配牌面板，不持久化
+    if (roomId === 'demo') return
     saveGame(roomId ?? '', game)
   }, [game, roomId])
 
   // 连接 WebSocket 房间（server.js）：连接成功即上报昵称，并监听玩家列表广播；断线自动重连
   useEffect(() => {
+    // 线下法官助手：纯本地面板，不连接服务器、不接入语音
+    if (roomId === 'demo') {
+      setConnState('closed')
+      return
+    }
     const room = roomId ?? 'demo'
+    let reconnectTimer: ReturnType<typeof setTimeout>
     const s = createRoomSocket(room)
     setSocket(s)
     setConnState('connecting')
 
     const onOpen = () => {
       setConnState('open')
-      const msg: ClientMessage = { type: 'join', playerId, nickname }
+      const msg: ClientMessage = { type: 'join', playerId, nickname, spectator: spectatorMode }
       s.send(JSON.stringify(msg))
     }
     const onMessage = (event: MessageEvent) => {
@@ -629,7 +675,11 @@ function Room() {
         // 忽略无法解析的消息
       }
     }
-    const onClosed = () => setConnState('closed')
+    const onClosed = () => {
+      setConnState('closed')
+      // 断线（切后台/锁屏/刷新/网络抖动）后 2 秒自动重连；重连成功由 onOpen 重新 join，服务端按 playerId 恢复座位与游戏状态
+      reconnectTimer = setTimeout(() => setReconnectTick((t) => t + 1), 2000)
+    }
 
     s.addEventListener('open', onOpen)
     s.addEventListener('message', onMessage)
@@ -637,13 +687,14 @@ function Room() {
     s.addEventListener('error', onClosed)
 
     return () => {
+      clearTimeout(reconnectTimer)
       s.removeEventListener('open', onOpen)
       s.removeEventListener('message', onMessage)
       s.removeEventListener('close', onClosed)
       s.removeEventListener('error', onClosed)
       s.close()
     }
-  }, [roomId, playerId, nickname])
+  }, [roomId, playerId, nickname, reconnectTick])
 
   const nightSteps: NightStepConfig[] = currentBoard.nightOrder.map(
     (key) =>
@@ -659,13 +710,31 @@ function Room() {
   const currentStep = nightSteps[game.nightIndex]
   const isLastStep = game.nightIndex >= nightSteps.length - 1
   const seats = Array.from({ length: seatCount }, (_, index) => index + 1)
+  /** 线下法官助手：累计出局座位（死亡/放逐/开枪） */
+  const judgeGraveyard = game.graveyard ?? []
   const exiledRole =
     game.exiledSeat !== null
       ? game.deal.find((role) => role.seat === game.exiledSeat)
       : undefined
   const gunActionLabel = exiledRole?.key === 'demon_hunter' ? '狩猎' : '开枪'
 
+  /** 线下法官助手：改变游戏状态前把当前状态压入撤回栈 */
+  const pushHistory = () => setGameHistory((h) => [...h, game])
+  /** 线下法官助手：撤回上一步，连续可撤直至开局 */
+  const undo = () => {
+    if (gameHistory.length === 0) return
+    const prev = gameHistory[gameHistory.length - 1]
+    setGameHistory(gameHistory.slice(0, -1))
+    setGame(prev)
+    setNightTargets([])
+    setWitchChoice(null)
+    setVoteSeat(null)
+    setGunArming(false)
+    setRevealSeat(null)
+  }
+
   const startGame = () => {
+    setGameHistory([])
     setGame({
       ...EMPTY_GAME,
       deal: shuffleDeal(currentBoard),
@@ -680,7 +749,27 @@ function Room() {
     setShowRecap(false)
   }
 
+  /** 线下法官助手：按法官手动分配的身份开局（绝不随机），1..N 全部分配后才可开始 */
+  const startJudgeGame = () => {
+    setGameHistory([])
+    const deal: SeatRole[] = []
+    for (let seat = 1; seat <= seatCount; seat += 1) {
+      const role = currentBoard.roles.find((r) => r.key === judgeAssign[seat])
+      if (!role) return
+      deal.push({ seat, key: role.key, name: role.name, camp: role.camp })
+    }
+    setGame({ ...EMPTY_GAME, deal, phase: 'night', dayCount: 1 })
+    setNightTargets([])
+    setWitchChoice(null)
+    setVoteSeat(null)
+    setGunArming(false)
+    setRevealSeat(null)
+    setShowRecap(false)
+    setJudgePickSeat(null)
+  }
+
   const resetGame = () => {
+    setGameHistory([])
     clearSavedGame(roomId ?? '')
     setGame({ ...EMPTY_GAME })
     setNightTargets([])
@@ -689,6 +778,8 @@ function Room() {
     setGunArming(false)
     setRevealSeat(null)
     setShowRecap(false)
+    setJudgeAssign({})
+    setJudgePickSeat(null)
   }
 
   // 夜晚面板：点击座位选择目标（再点一次取消）
@@ -801,6 +892,9 @@ function Room() {
           dayStage: 'deaths',
           exiledSeat: null,
           exileHasLastWords: null,
+          graveyard: [
+            ...new Set([...(prev.graveyard ?? []), ...computeDeaths(nextLog)]),
+          ],
         }
       }
       return { ...prev, nightLog: nextLog, nightIndex: prev.nightIndex + 1 }
@@ -812,6 +906,7 @@ function Room() {
   }
 
   const handleNextStep = () => {
+    pushHistory()
     if (!currentStep) return
     if (currentStep.key === 'witch') {
       if (witchChoice === null) return
@@ -830,6 +925,7 @@ function Room() {
   }
 
   const handleSkipStep = () => {
+    pushHistory()
     const step = currentStep
     if (!step) return
     handleAdvance({
@@ -856,6 +952,7 @@ function Room() {
   // ---- 白天流程 ----
 
   const startVote = () => {
+    pushHistory()
     setGame((prev) => ({ ...prev, dayStage: 'vote' }))
     setVoteSeat(null)
   }
@@ -866,13 +963,20 @@ function Room() {
   }
 
   const confirmExile = () => {
+    pushHistory()
     if (voteSeat === null) return
-    setGame((prev) => ({ ...prev, exiledSeat: voteSeat, dayStage: 'exile' }))
+    setGame((prev) => ({
+      ...prev,
+      exiledSeat: voteSeat,
+      dayStage: 'exile',
+      graveyard: [...new Set([...(prev.graveyard ?? []), voteSeat])],
+    }))
     setVoteSeat(null)
     setGunArming(false)
   }
 
   const markTie = () => {
+    pushHistory()
     setGame((prev) => ({
       ...prev,
       dayStage: 'summary',
@@ -881,6 +985,7 @@ function Room() {
   }
 
   const handleLastWords = (has: boolean) => {
+    pushHistory()
     if (game.exiledSeat === null) return
     setGame((prev) => {
       const role = prev.deal.find((item) => item.seat === prev.exiledSeat)
@@ -903,11 +1008,13 @@ function Room() {
   }
 
   const handleGunShoot = (target: number) => {
+    pushHistory()
     if (game.exiledSeat === null) return
     const actionWord = exiledRole?.key === 'demon_hunter' ? '狩猎' : '开枪'
     setGame((prev) => ({
       ...prev,
       dayStage: 'summary',
+      graveyard: [...new Set([...(prev.graveyard ?? []), target])],
       dayLog: [
         ...prev.dayLog,
         `${prev.exiledSeat}号玩家（${exiledRole?.name ?? '该角色'}）${actionWord}带走了 ${target}号玩家`,
@@ -917,6 +1024,7 @@ function Room() {
   }
 
   const handleGunNoShoot = () => {
+    pushHistory()
     if (game.exiledSeat === null) return
     const actionWord = exiledRole?.key === 'demon_hunter' ? '狩猎' : '开枪'
     setGame((prev) => ({
@@ -932,6 +1040,7 @@ function Room() {
 
   // 白天处理完成 -> 进入黑夜（保留发牌/天数/白天记录，夜晚记录清空以便计算新死讯）
   const enterNight = () => {
+    pushHistory()
     setGame((prev) => ({
       ...prev,
       phase: 'night',
@@ -1224,46 +1333,33 @@ function Room() {
           </Link>
           {isDemo && (
             <span className="rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-300">
-              测试环境
+              线下法官助手
             </span>
           )}
         </div>
 
-        <h1
-          className="select-none text-2xl font-bold"
-          onPointerDown={startTitleHold}
-          onPointerUp={cancelTitleHold}
-          onPointerLeave={cancelTitleHold}
-          onPointerCancel={cancelTitleHold}
-        >
-          房间
-        </h1>
+        <div className="flex items-center justify-between gap-3">
+          <h1
+            className="select-none text-2xl font-bold"
+            onPointerDown={startTitleHold}
+            onPointerUp={cancelTitleHold}
+            onPointerLeave={cancelTitleHold}
+            onPointerCancel={cancelTitleHold}
+          >
+            {isDemo ? '线下法官助手' : '房间'}
+          </h1>
+          {!isDemo && (
+            <button type="button" onClick={copyRoomCode} className="flex items-center gap-1.5">
+              <span onClick={handleRoomCodeTap} className="text-base font-black tracking-[0.15em] text-amber-400">{roomId?.toUpperCase()}</span>
+              <span className={`rounded px-1.5 py-0.5 text-[11px] font-bold ${copied ? 'bg-emerald-500 text-slate-950' : 'bg-amber-500/20 text-amber-300'}`}>{copied ? '已复制 ✓' : '复制'}</span>
+            </button>
+          )}
+        </div>
         {!onlineStarted && (
           <>
-        {/* 顶部信息条：房间码/复制/昵称 + 板子名/查看角色 —— 压缩为两行，不占首屏 */}
-        <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1.5">
-          <span className="text-xs text-slate-400">房间码</span>
-          <button type="button" onClick={copyRoomCode} className="flex items-center gap-2">
-            <span
-              onClick={handleRoomCodeTap}
-              className="text-lg font-black tracking-[0.15em] text-amber-400"
-            >
-              {roomId?.toUpperCase()}
-            </span>
-            <span
-              className={`rounded-md px-2 py-0.5 text-xs font-bold ${
-                copied
-                  ? 'bg-emerald-500 text-slate-950'
-                  : 'bg-amber-500/20 text-amber-300'
-              }`}
-            >
-              {copied ? '已复制 ✓' : '复制'}
-            </span>
-          </button>
-          <span className="ml-auto text-xs text-slate-400">
-            我的昵称：<span className="text-slate-100">{nickname}</span>
-          </span>
-        </div>
+        {/* 顶部信息条：房间码/复制/昵称（线下法官助手为纯本地模式，不显示房间码/开发者模式） */}
+        {!isDemo && (
+        <>
         {copied && (
           <p className="mt-1 text-xs font-medium text-emerald-400">房间码已复制到剪贴板</p>
         )}
@@ -1278,6 +1374,8 @@ function Room() {
               退出开发者模式
             </button>
           </div>
+        )}
+        </>
         )}
 
         {/* 板子名 + 查看角色 */}
@@ -1316,8 +1414,8 @@ function Room() {
           </div>
         )}
 
-        {!onlineStarted && (
-                <section className="mt-8">
+        {!onlineStarted && !isDemo && (
+                <section className="mt-3 pb-44">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-medium text-slate-400">
               座位表（{roster.length}/{currentBoard.playerCount} 人已入座）
@@ -1351,7 +1449,7 @@ function Room() {
                     if (player || meSeat == null || meSeat === seat) return
                     socket.send(JSON.stringify({ type: 'changeSeat', playerId, seat }))
                   }}
-                  className={`flex items-center gap-2 rounded-xl border px-2 py-1.5 ${
+                      className={`flex items-center gap-1.5 rounded-lg border px-1.5 py-1 ${seat > currentBoard.playerCount / 2 ? 'flex-row-reverse' : ''} ${
                     player
                       ? 'border-slate-700 bg-slate-900'
                       : onlineStarted
@@ -1360,7 +1458,7 @@ function Room() {
                   }`}
                 >
                   {/* 头像框：只有已入座玩家显示头像，空位仅显示座位号 */}
-                  <div className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-full border border-slate-600 bg-slate-800">
+                  <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-full border border-slate-600 bg-slate-800">
                     {player ? (
                       player.avatarUrl ? (
                         <img
@@ -1385,9 +1483,9 @@ function Room() {
                       </span>
                     )}
                   </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-1">
-                      <span className="truncate text-sm font-bold text-slate-100">
+                  <div className={`min-w-0 flex-1 ${seat > currentBoard.playerCount / 2 ? 'text-right' : ''}`}>
+                    <div className={`flex flex-wrap items-center gap-1 ${seat > currentBoard.playerCount / 2 ? 'justify-end' : ''}`}>
+                      <span className="truncate text-xs font-bold text-slate-100"><span className="mr-1 font-black text-amber-400">{seat}号</span>
                         {player ? player.nickname : '空位'}
                       </span>
                       {player?.playerId === hostPlayerId && (
@@ -1402,7 +1500,7 @@ function Room() {
                       )}
                     </div>
                     <p
-                      className={`mt-0.5 text-xs ${
+                      className={`mt-0.5 text-xs ${seat > currentBoard.playerCount / 2 ? 'text-right ' : ''} ${
                         player
                           ? player.ready
                             ? 'text-emerald-400'
@@ -1423,6 +1521,11 @@ function Room() {
               )
             })}
           </div>
+          {roster.some((p) => p.seat == null) && (
+            <p className="mt-2 text-xs text-slate-500">
+              👁 观战：{roster.filter((p) => p.seat == null).map((p) => p.nickname).join('、')}
+            </p>
+          )}
           {roster.length === 0 && (
             <p className="mt-3 rounded-xl border border-dashed border-slate-700 px-4 py-3 text-center text-sm text-slate-500">
               等待玩家加入…（另一台设备或新窗口输入同一房间码即可看到）
@@ -1430,15 +1533,15 @@ function Room() {
           )}
 
           {/* 底部操作栏：fixed 固定吸底，任何滚动位置都可见可操作 */}
-          <div className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-800 bg-slate-950/95 px-4 pb-4 pt-3 backdrop-blur">
+          <div className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-800 bg-slate-950/95 px-4 pt-3 pb-[max(16px,env(safe-area-inset-bottom))] backdrop-blur">
             <div className="mx-auto w-full max-w-[480px]">
               <div className="flex gap-2">
-                {me && (
+                {me && !spectatorMode && (
                   <button
                     type="button"
                     onClick={toggleReady}
                     disabled={connState !== 'open'}
-                    className={`flex-1 rounded-2xl py-3 text-base font-bold transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 ${
+                    className={`flex-1 rounded-xl py-2 text-sm font-bold transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 ${
                       me.ready
                         ? 'bg-slate-700 text-slate-100'
                         : 'bg-emerald-500 text-slate-950'
@@ -1452,7 +1555,7 @@ function Room() {
                     type="button"
                     onClick={startOnlineGame}
                     disabled={!canStart}
-                    className="flex-1 rounded-2xl bg-amber-500 py-3 text-base font-bold text-slate-950 shadow-lg shadow-amber-500/30 transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
+                    className="flex-1 rounded-xl bg-amber-500 py-2 text-sm font-bold text-slate-950 shadow-lg shadow-amber-500/30 transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     开始游戏（服务端发牌）
                   </button>
@@ -1476,17 +1579,137 @@ function Room() {
         </section>
         )}
 
-        {/* 本地测试面板入口（仅演示模式）：在线开局的准备/开始按钮已在上面吸底操作栏 */}
-        {isDemo && !onlineStarted && (
-          <div className="mt-8 flex flex-col gap-3">
-            <button
-              type="button"
-              onClick={startGame}
-              className="w-full rounded-2xl border border-slate-700 py-2 text-sm font-bold text-slate-300 transition active:scale-95"
-            >
-              进入本地测试面板（单人法官）
-            </button>
-          </div>
+        {/* 线下法官助手：手动配牌——点击号码给 1..N 号分配角色，可随时修改/重置，不连服不接语音 */}
+        {isDemo && !onlineStarted && game.phase === 'waiting' && (
+          <section className="mt-6 pb-44">
+            <h2 className="text-sm font-bold text-slate-200">
+              手动分配身份 · 已分配 {Object.keys(judgeAssign).length}/{seatCount}
+            </h2>
+            <p className="mt-1 text-xs text-slate-400">点击号码，给该座位选择角色；可随时修改</p>
+            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+              🌙 夜间睁眼顺序：{currentBoard.nightOrder.map((k) => ROLES.find((r) => r.key === k)?.name ?? (k === 'werewolf' ? '狼人' : k)).join(' → ')}
+            </p>
+            <div className="mt-3 grid grid-cols-3 gap-2.5">
+              {seats.map((seat) => {
+                const role = currentBoard.roles.find((r) => r.key === judgeAssign[seat])
+                return (
+                  <button
+                    key={seat}
+                    type="button"
+                    onClick={() => setJudgePickSeat(seat)}
+                    className={`flex flex-col items-center gap-0.5 rounded-2xl border px-2 py-3 transition active:scale-95 ${
+                      role
+                        ? 'border-amber-500/60 bg-amber-500/10'
+                        : 'border-dashed border-slate-700 bg-slate-900/60'
+                    }`}
+                  >
+                    <span className="text-lg font-black text-slate-100">{seat}号</span>
+                    <span
+                      className={`text-xs font-bold ${
+                        role
+                          ? role.camp === 'wolf'
+                            ? 'text-rose-300'
+                            : role.camp === 'good'
+                              ? 'text-emerald-300'
+                              : 'text-violet-300'
+                          : 'text-slate-500'
+                      }`}
+                    >
+                      {role ? role.name : '未分配'}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+
+            {/* 角色选择弹层：给当前号码指定/清除角色 */}
+            {judgePickSeat !== null && (
+              <div
+                className="fixed inset-0 z-50 flex items-end justify-center bg-black/60"
+                onClick={() => setJudgePickSeat(null)}
+              >
+                <div
+                  className="w-full max-w-[480px] rounded-t-2xl border-t border-amber-500/40 bg-slate-900 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="flex items-center justify-between">
+                    <p className="text-base font-black text-slate-100">给 {judgePickSeat} 号分配角色</p>
+                    <button type="button" onClick={() => setJudgePickSeat(null)} className="text-slate-400">
+                      ✕
+                    </button>
+                  </div>
+                  <div className="mt-3 grid max-h-[52dvh] grid-cols-2 gap-2 overflow-y-auto">
+                    {currentBoard.roles.map((role) => (
+                      <button
+                        key={role.key}
+                        type="button"
+                        onClick={() => {
+                          setJudgeAssign((prev) => ({ ...prev, [judgePickSeat]: role.key }))
+                          setJudgePickSeat(null)
+                        }}
+                        className={`rounded-xl border px-2 py-2.5 text-sm font-bold transition active:scale-95 ${
+                          judgeAssign[judgePickSeat] === role.key
+                            ? 'border-amber-500 bg-amber-500/20 text-amber-200'
+                            : 'border-slate-700 bg-slate-950 text-slate-200'
+                        }`}
+                      >
+                        {role.name}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-3 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setJudgeAssign((prev) => {
+                          const next = { ...prev }
+                          delete next[judgePickSeat]
+                          return next
+                        })
+                        setJudgePickSeat(null)
+                      }}
+                      className="flex-1 rounded-xl border border-slate-700 py-2.5 text-sm font-bold text-slate-300 active:scale-95"
+                    >
+                      清除该号码
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setJudgePickSeat(null)}
+                      className="flex-1 rounded-xl bg-slate-700 py-2.5 text-sm font-bold text-slate-100 active:scale-95"
+                    >
+                      取消
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 吸底操作栏：重置全部 + 开始游戏（12 个号码全部分配后才可开始） */}
+            <div className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-800 bg-slate-950/95 px-4 pt-3 pb-[max(16px,env(safe-area-inset-bottom))] backdrop-blur">
+              <div className="mx-auto flex w-full max-w-[480px] gap-2">
+                <button
+                  type="button"
+                  onClick={() => setJudgeAssign({})}
+                  className="rounded-xl bg-slate-700 px-4 py-2 text-sm font-bold text-slate-100 transition active:scale-95"
+                >
+                  重置
+                </button>
+                <button
+                  type="button"
+                  onClick={startJudgeGame}
+                  disabled={Object.keys(judgeAssign).length < seatCount}
+                  className="flex-1 rounded-xl bg-amber-500 py-2 text-sm font-bold text-slate-950 shadow-lg shadow-amber-500/30 transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  开始游戏（{Object.keys(judgeAssign).length}/{seatCount}）
+                </button>
+              </div>
+              {Object.keys(judgeAssign).length < seatCount && (
+                <p className="mt-1.5 text-center text-xs text-slate-500">
+                  还有 {seatCount - Object.keys(judgeAssign).length} 个号码未分配角色
+                </p>
+              )}
+            </div>
+          </section>
         )}
 
         {onlineStarted && (
@@ -1511,7 +1734,7 @@ function Room() {
                   return (
                     <div
                       key={seatNum}
-                      className={`flex items-center gap-2 rounded-xl border px-2 py-1.5 ${
+                      className={`flex items-center gap-1.5 rounded-lg border px-1.5 py-1 ${seatNum > currentBoard.playerCount / 2 ? 'flex-row-reverse' : ''} ${
                         isDead
                           ? 'border-slate-800/50 bg-slate-900/40 opacity-60'
                           : s
@@ -1519,7 +1742,7 @@ function Room() {
                             : 'border-dashed border-slate-800 bg-slate-950/50'
                       }`}
                     >
-                      <div className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-full border border-slate-600 bg-slate-800">
+                      <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-full border border-slate-600 bg-slate-800">
                         {s ? (
                           s.avatarUrl ? (
                             <img
@@ -1544,16 +1767,16 @@ function Room() {
                           </span>
                         )}
                       </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-1">
-                          <span className="truncate text-sm font-bold text-slate-100">
+                      <div className={`min-w-0 flex-1 ${seatNum > currentBoard.playerCount / 2 ? 'text-right' : ''}`}>
+                        <div className={`flex flex-wrap items-center gap-1 ${seatNum > currentBoard.playerCount / 2 ? 'justify-end' : ''}`}>
+                          <span className="truncate text-xs font-bold text-slate-100"><span className="mr-1 font-black text-amber-400">{seatNum}号</span>
                             {isDead ? '已出局' : s ? s.nickname : '空位'}
                           </span>
                           {s?.playerId === playerId && !isDead && (
                             <span className="text-xs text-slate-500">（我）</span>
                           )}
                         </div>
-                        <div className="mt-0.5 flex flex-wrap items-center gap-1 text-[11px]">
+                        <div className={`mt-0.5 flex flex-wrap items-center gap-1 text-[11px] ${seatNum > currentBoard.playerCount / 2 ? 'justify-end' : ''}`}>
                           {s?.seat === sheriffSeat && (
                             <span className="font-bold text-amber-300">👑 警长</span>
                           )}
@@ -1648,12 +1871,12 @@ function Room() {
             <button
               type="button"
               onClick={() => setShowVoteHistory((v) => !v)}
-              className="fixed right-2 bottom-24 z-50 flex items-center gap-1 rounded-full border border-amber-500/50 bg-slate-950/95 px-3 py-1.5 text-xs font-bold text-amber-300 shadow-lg backdrop-blur transition active:scale-95"
+              className="fixed right-2 bottom-[calc(6rem+env(safe-area-inset-bottom))] z-50 flex items-center gap-1 rounded-full border border-amber-500/50 bg-slate-950/95 px-3 py-1.5 text-xs font-bold text-amber-300 shadow-lg backdrop-blur transition active:scale-95"
             >
               📋 投票记录 {showVoteHistory ? '▴' : '▾'}
             </button>
             {showVoteHistory && (
-              <div className="fixed inset-x-0 bottom-24 z-50 mx-auto max-h-[38dvh] w-full max-w-[480px] overflow-y-auto rounded-t-2xl border border-amber-500/40 bg-slate-950/95 p-3 shadow-2xl backdrop-blur">
+              <div className="fixed inset-x-0 bottom-[calc(6rem+env(safe-area-inset-bottom))] z-50 mx-auto max-h-[38dvh] w-full max-w-[480px] overflow-y-auto rounded-t-2xl border border-amber-500/40 bg-slate-950/95 p-3 shadow-2xl backdrop-blur">
                 <div className="flex items-center justify-between">
                   <p className="text-xs font-bold text-amber-300">📋 投票记录（放逐投票）</p>
                   <button
@@ -1687,10 +1910,10 @@ function Room() {
           </>
         )}
 
-        {(trtcCred || (onlineStarted && myRole?.trtc)) && (
+        {!isDemo && (trtcCred || (onlineStarted && myRole?.trtc)) && (
           <div
-            className={`fixed inset-x-0 z-30 mx-auto flex h-11 max-w-[480px] items-center border-t border-slate-800 bg-slate-900/95 px-3 ${
-              onlineStarted ? 'bottom-0' : 'bottom-[78px]'
+            className={`fixed inset-x-0 z-30 mx-auto max-w-[480px] ${
+              onlineStarted ? 'bottom-0' : 'bottom-[calc(82px+max(16px,env(safe-area-inset-bottom)))]'
             }`}
           >
             <VoiceRoom
@@ -1719,7 +1942,7 @@ function Room() {
         )}
 
         {onlineStarted && onlinePhase === 'night' && (
-          <section className={`fixed inset-x-0 bottom-11 z-40 mx-auto flex max-h-[calc(58dvh-44px)] max-w-[480px] flex-col overflow-y-auto rounded-t-2xl border-t border-indigo-500/40 bg-slate-950/95 p-3 shadow-2xl backdrop-blur ${phaseDisabled && isMyPhase ? 'pointer-events-none [&_button]:opacity-40' : ''}`}>
+          <section className={`fixed inset-x-0 bottom-[calc(44px+max(8px,env(safe-area-inset-bottom)))] z-40 mx-auto flex max-h-[calc(58dvh-52px)] max-w-[480px] flex-col overflow-y-auto rounded-t-2xl border-t border-indigo-500/40 bg-slate-950/95 p-3 shadow-2xl backdrop-blur ${phaseDisabled && isMyPhase ? 'pointer-events-none [&_button]:opacity-40' : ''}`}>
             <div className="flex items-center justify-between">
               <p className="text-xs text-slate-400">夜晚 · 第 {onlineNightIndex} 夜</p>
               <span
@@ -2450,7 +2673,7 @@ function Room() {
 
         {/* 死讯与白天流程区：警长竞选完成后才显示（竞选期间只显示竞选界面，不提前播报死讯） */}
         {onlineStarted && onlinePhase === 'day' && nightEnded && (
-          <section className="fixed inset-x-0 bottom-11 z-40 mx-auto flex max-h-[calc(58dvh-44px)] max-w-[480px] flex-col overflow-y-auto rounded-t-2xl border-t border-emerald-500/40 bg-slate-950/95 p-3 shadow-2xl backdrop-blur">
+          <section className="fixed inset-x-0 bottom-[calc(44px+max(8px,env(safe-area-inset-bottom)))] z-40 mx-auto flex max-h-[calc(58dvh-52px)] max-w-[480px] flex-col overflow-y-auto rounded-t-2xl border-t border-emerald-500/40 bg-slate-950/95 p-3 shadow-2xl backdrop-blur">
             <div className="flex items-center justify-between">
               <p className="text-xs text-slate-400">白天 · 第 {nightEnded.dayIndex} 天</p>
               {(dayStage === 'talk' && talkRemainSec !== null) ||
@@ -2521,7 +2744,7 @@ function Room() {
 
             {/* 警长竞选：上警 */}
             {sheriffStage === 'apply' && (
-              <div className="mt-4 rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-4">
+              <div className="mt-4 rounded-xl border border-slate-700 bg-slate-900/60 px-3 py-2.5">
                 <p className="text-center text-base font-bold text-amber-300">
                   警长竞选开始
                 </p>
@@ -2537,7 +2760,7 @@ function Room() {
                     已选择：{mySheriffChoice === 'apply' ? '上警' : '不上警'}（等待其他玩家…）
                   </p>
                 ) : (
-                  <div className="mt-3 grid grid-cols-2 gap-3">
+                  <div className="mt-2 grid grid-cols-2 gap-2">
                     <button
                       type="button"
                       onClick={() => submitSheriffApply(true)}
@@ -2564,7 +2787,7 @@ function Room() {
 
             {/* 警长竞选：警上发言（复用轮流发言 + 退水） */}
             {sheriffStage === 'talk' && (
-              <div className="mt-4 rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-4">
+              <div className="mt-4 rounded-xl border border-slate-700 bg-slate-900/60 px-3 py-2.5">
                 <p className="text-center text-base font-bold text-amber-300">
                   警上发言 · 候选：{sheriffCandidates.map((s) => `${s}号`).join('、')}
                 </p>
@@ -2613,7 +2836,7 @@ function Room() {
 
             {/* 警长竞选：警下投票 */}
             {sheriffStage === 'vote' && (
-              <div className="mt-4 rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-4">
+              <div className="mt-4 rounded-xl border border-slate-700 bg-slate-900/60 px-3 py-2.5">
                 <p className="text-center text-base font-bold text-amber-300">
                   警下投票 · 请选择警长
                 </p>
@@ -2641,7 +2864,7 @@ function Room() {
                         key={seat}
                         type="button"
                         onClick={() => submitSheriffVote(seat)}
-                        className="rounded-xl border border-amber-500/50 bg-slate-950 py-3 text-sm font-bold text-amber-300 transition active:scale-95"
+                        className="rounded-xl border border-amber-500/50 bg-slate-950 py-2 text-sm font-bold text-amber-300 transition active:scale-95"
                       >
                         {seat} 号
                       </button>
@@ -2663,11 +2886,11 @@ function Room() {
 
             {/* 警长决定发言方向（仅警长本人） */}
             {sheriffStage === 'order' && (myRole?.seat ?? -1) === sheriffSeat && (
-              <div className="mt-4 rounded-xl border border-amber-500/40 bg-slate-900/80 px-4 py-4">
+              <div className="mt-4 rounded-xl border border-amber-500/40 bg-slate-900/80 px-3 py-2.5">
                 <p className="text-center text-base font-bold text-amber-300">
                   你当选警长，请决定发言顺序
                 </p>
-                <div className="mt-3 grid grid-cols-2 gap-3">
+                <div className="mt-2 grid grid-cols-2 gap-2">
                   {(
                     [
                       ['dead_left', '从死左发言'],
@@ -2680,7 +2903,7 @@ function Room() {
                       key={dir}
                       type="button"
                       onClick={() => submitSheriffOrder(dir)}
-                      className="rounded-2xl bg-amber-500 py-4 text-sm font-bold text-slate-950 transition active:scale-95"
+                      className="rounded-2xl bg-amber-500 py-2 text-sm font-bold text-slate-950 transition active:scale-95"
                     >
                       {label}
                     </button>
@@ -2692,7 +2915,7 @@ function Room() {
             {/* 警长出局：移交/撕毁警徽（仅警长本人）；其他人等待 */}
             {sheriffStage === 'death' &&
               (myRole?.seat ?? -1) === sheriffSeat && (
-                <div className="mt-4 rounded-xl border border-amber-500/40 bg-slate-900/80 px-4 py-4">
+                <div className="mt-4 rounded-xl border border-amber-500/40 bg-slate-900/80 px-3 py-2.5">
                   <p className="text-center text-base font-bold text-amber-300">
                     你出局了，请处理警徽
                   </p>
@@ -2705,7 +2928,7 @@ function Room() {
                         key={seat}
                         type="button"
                         onClick={() => submitSheriffGiveaway(seat)}
-                        className="rounded-xl border border-amber-500/50 bg-slate-950 py-3 text-sm font-bold text-amber-300 transition active:scale-95"
+                        className="rounded-xl border border-amber-500/50 bg-slate-950 py-2 text-sm font-bold text-amber-300 transition active:scale-95"
                       >
                         {seat} 号
                       </button>
@@ -2729,7 +2952,7 @@ function Room() {
 
             {/* 发言阶段：按顺序轮流发言，只有当前发言者可过麦 */}
             {dayStage === 'talk' && (
-              <div className="mt-4 rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-4">
+              <div className="mt-4 rounded-xl border border-slate-700 bg-slate-900/60 px-3 py-2.5">
                 {currentSpeaker === null ? (
                   <p className="text-center text-sm text-slate-400">正在准备发言顺序…</p>
                 ) : deadSeats.includes(myRole?.seat ?? -1) ? (
@@ -2920,349 +3143,397 @@ function Room() {
 
         {game.phase !== 'waiting' && (
           <>
-            <section className="mt-8">
-              <h2 className="text-sm font-medium text-slate-400">
-                查看身份（测试用，点按座位查看）
-              </h2>
-              <div className="mt-3 grid grid-cols-4 gap-3">
-                {seats.map((seat) => (
+            {/* 顶部状态条 + 座位身份格（点按查看身份，出局置灰划线） */}
+            <section className="mt-4">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-black text-amber-300">
+                  {game.phase === 'night'
+                    ? `🌙 第${game.dayCount}夜 ${game.nightIndex + 1}/${nightSteps.length} · ${currentStep?.name ?? ''}`
+                    : `☀️ 第${game.dayCount}天`}
+                </p>
+                <div className="flex shrink-0 gap-1.5">
                   <button
-                    key={seat}
                     type="button"
-                    onClick={() => setRevealSeat(seat)}
-                    className="rounded-xl border border-slate-700 bg-slate-900 py-3 text-sm font-medium transition active:scale-95"
+                    onClick={undo}
+                    disabled={gameHistory.length === 0}
+                    className="rounded-lg border border-amber-500/50 px-2.5 py-1 text-xs font-bold text-amber-300 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
                   >
-                    {seat}号玩家
+                    ↩ 撤回
                   </button>
-                ))}
+                  <button
+                    type="button"
+                    onClick={() => setShowJudgeLog(true)}
+                    className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs font-bold text-slate-300 active:scale-95"
+                  >
+                    📋 记录
+                  </button>
+                  <button
+                    type="button"
+                    onClick={resetGame}
+                    className="rounded-lg border border-rose-500/50 px-2.5 py-1 text-xs font-bold text-rose-300 active:scale-95"
+                  >
+                    结束
+                  </button>
+                </div>
+              </div>
+              <div className="mt-2 grid grid-cols-3 gap-2">
+                {seats.map((seat) => {
+                  const dead = judgeGraveyard.includes(seat)
+                  const role = game.deal.find((d) => d.seat === seat)
+                  return (
+                    <button
+                      key={seat}
+                      type="button"
+                      onClick={() => setRevealSeat(seat)}
+                      className={`flex flex-col items-center rounded-lg border px-1 py-2 transition active:scale-95 ${
+                        dead
+                          ? 'border-slate-800 bg-slate-900/40'
+                          : 'border-slate-700 bg-slate-900'
+                      }`}
+                    >
+                      <span className={`text-2xl font-black leading-none ${dead ? 'text-slate-600 line-through' : 'text-slate-100'}`}>
+                        {seat}号
+                      </span>
+                      <span className={`mt-1 text-base leading-tight ${dead ? 'text-slate-600 line-through' : role?.camp === 'wolf' ? 'text-rose-300' : role?.camp === 'good' ? 'text-emerald-300' : 'text-violet-300'}`}>
+                        {role?.name ?? '?'}
+                      </span>
+                    </button>
+                  )
+                })}
               </div>
             </section>
 
-            {game.phase === 'night' && currentStep && (
-              <section className="mt-8 rounded-2xl border border-amber-500/40 bg-slate-900 p-6">
-                <p className="text-xs text-slate-400">
-                  系统流程测试面板 · 第 {game.dayCount} 夜 · 第 {game.nightIndex + 1}/
-                  {nightSteps.length} 步
-                </p>
-                <p className="mt-3 text-lg font-bold">{currentStep.name} 行动</p>
-                <p className="mt-2 text-sm leading-relaxed text-slate-300">
-                  {currentStep.prompt}
-                </p>
+            {/* 底部固定操作卡（与在线游戏同款紧凑面板，整页无需滚动） */}
+            <section className="fixed inset-x-0 bottom-0 z-40 mx-auto max-h-[60dvh] w-full max-w-[480px] overflow-y-auto rounded-t-2xl border-t border-amber-500/40 bg-slate-950/95 p-3 pb-[max(12px,env(safe-area-inset-bottom))] shadow-2xl backdrop-blur">
+              {game.phase === 'night' && currentStep && (
+                <>
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-black text-slate-100">{currentStep.name} 行动</p>
+                    <span className="text-[11px] text-slate-500">
+                      {game.nightIndex + 1}/{nightSteps.length}
+                    </span>
+                  </div>
+                  <p className="mt-0.5 text-xs leading-snug text-slate-400">
+                    {JUDGE_STEP_HINTS[currentStep.key] ?? ''}
+                  </p>
 
-                {currentStep.key === 'witch' && witchChoice === null && (
-                  <div className="mt-5 flex flex-col gap-3">
+                  {currentStep.key === 'witch' && witchChoice === null && (
+                    <div className="mt-2 grid grid-cols-3 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setWitchChoice('heal')}
+                        className="rounded-lg bg-emerald-500 py-2 text-xs font-bold text-slate-950 active:scale-95"
+                      >
+                        解药救人
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setWitchChoice('poison')}
+                        className="rounded-lg bg-rose-500 py-2 text-xs font-bold text-slate-950 active:scale-95"
+                      >
+                        毒药杀人
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setWitchChoice('none')}
+                        className="rounded-lg bg-slate-700 py-2 text-xs font-bold text-slate-100 active:scale-95"
+                      >
+                        不用药
+                      </button>
+                    </div>
+                  )}
+
+                  {(currentStep.needTarget ||
+                    (currentStep.key === 'witch' &&
+                      witchChoice !== null &&
+                      witchChoice !== 'none')) && (
+                    <>
+                      <p className="mt-2 text-[11px] text-slate-500">
+                        {currentStep.key === 'witch'
+                          ? witchChoice === 'heal'
+                            ? '选择要救的玩家'
+                            : '选择要毒的玩家'
+                          : currentStep.targetCount === 2
+                            ? '依次选 2 名玩家（再点取消）'
+                            : '点击选择目标（再点取消）'}
+                      </p>
+                      <div className="mt-1 grid grid-cols-6 gap-1.5">
+                        {seats
+                          .filter((seat) => !judgeGraveyard.includes(seat))
+                          .map((seat) => {
+                            const selected = nightTargets.includes(seat)
+                            return (
+                              <button
+                                key={seat}
+                                type="button"
+                                onClick={() => handleSeatSelect(seat)}
+                                className={`rounded-lg py-2 text-xs font-bold active:scale-95 ${
+                                  selected
+                                    ? 'bg-amber-500 text-slate-950'
+                                    : 'border border-slate-700 bg-slate-900 text-slate-300'
+                                }`}
+                              >
+                                {seat}号
+                              </button>
+                            )
+                          })}
+                      </div>
+                    </>
+                  )}
+
+                  <div className="mt-2.5 flex gap-2">
+                    {currentStep.canSkip && (
+                      <button
+                        type="button"
+                        onClick={handleSkipStep}
+                        className="rounded-xl bg-slate-700 px-4 py-2.5 text-sm font-bold text-slate-100 active:scale-95"
+                      >
+                        跳过
+                      </button>
+                    )}
                     <button
                       type="button"
-                      onClick={() => setWitchChoice('heal')}
-                      className="w-full rounded-xl bg-emerald-500 py-2 text-sm font-bold text-slate-950 transition active:scale-95"
+                      onClick={handleNextStep}
+                      disabled={!canNext}
+                      className="flex-1 rounded-xl bg-amber-500 py-2.5 text-sm font-bold text-slate-950 shadow-lg shadow-amber-500/30 active:scale-95 disabled:opacity-40"
                     >
-                      解药救人
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setWitchChoice('poison')}
-                      className="w-full rounded-xl bg-rose-500 py-2 text-sm font-bold text-slate-950 transition active:scale-95"
-                    >
-                      毒药杀人
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setWitchChoice('none')}
-                      className="w-full rounded-2xl bg-slate-700 py-2 text-sm font-bold text-slate-100 transition active:scale-95"
-                    >
-                      不用药
+                      {isLastStep ? '天亮了' : '下一步'}
                     </button>
                   </div>
-                )}
+                </>
+              )}
 
-                {(currentStep.needTarget ||
-                  (currentStep.key === 'witch' &&
-                    witchChoice !== null &&
-                    witchChoice !== 'none')) && (
-                  <>
-                    <p className="mt-5 text-xs text-slate-400">
-                      点击座位选择目标（
-                      {currentStep.key === 'witch'
-                        ? '选 1 名玩家'
-                        : currentStep.targetCount === 2
-                          ? '依次选 2 名玩家，可点取消'
-                          : '选 1 名玩家，可点取消'}
-                      ）
-                    </p>
-                    <div className="mt-2 grid grid-cols-4 gap-3">
-                      {seats
-                        .filter((seat) => !game.deaths.includes(seat))
-                        .map((seat) => {
-                        const selected = nightTargets.includes(seat)
-                        return (
-                          <button
-                            key={seat}
-                            type="button"
-                            onClick={() => handleSeatSelect(seat)}
-                            className={`rounded-lg py-1.5 text-xs font-bold transition active:scale-95 ${
-                              selected
-                                ? 'bg-amber-500 text-slate-950'
-                                : 'border border-slate-700 bg-slate-950 text-slate-300'
-                            }`}
-                          >
-                            {seat}号
-                          </button>
-                        )
-                      })}
-                    </div>
-                  </>
-                )}
-
-                <div className="mt-6 flex flex-col gap-3">
-                  {currentStep.canSkip && (
-                    <button
-                      type="button"
-                      onClick={handleSkipStep}
-                      className="w-full rounded-2xl bg-slate-700 py-2 text-sm font-bold text-slate-100 transition active:scale-95"
-                    >
-                      跳过（不使用技能）
-                    </button>
+              {game.phase === 'day' && (
+                <>
+                  {game.dayStage === 'deaths' && (
+                    <>
+                      <p className="text-sm font-black text-slate-100">昨晚死讯</p>
+                      <p className="mt-1 text-xs font-bold text-rose-300">
+                        {game.deaths.length > 0
+                          ? game.deaths.map((seat) => `${seat}号死亡`).join('、')
+                          : '平安夜，无人死亡'}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={startVote}
+                        className="mt-2.5 w-full rounded-xl bg-amber-500 py-2.5 text-sm font-bold text-slate-950 active:scale-95"
+                      >
+                        发起投票
+                      </button>
+                    </>
                   )}
-                  <button
-                    type="button"
-                    onClick={handleNextStep}
-                    disabled={!canNext}
-                    className="w-full rounded-2xl bg-amber-500 py-2 text-sm font-bold text-slate-950 shadow-lg shadow-amber-500/30 transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 disabled:active:scale-100"
-                  >
-                    {isLastStep ? '天亮了' : '下一步'}
-                  </button>
-                </div>
-              </section>
-            )}
 
-            {game.phase === 'day' && (
-              <section className="mt-8 rounded-2xl border border-rose-500/40 bg-slate-900 p-6">
-                <p className="text-xs text-slate-400">天亮 · 第 {game.dayCount} 天</p>
-
-                <p className="mt-3 text-2xl font-bold">昨晚死讯</p>
-                {game.deaths.length > 0 ? (
-                  <>
-                    <p className="mt-3 text-lg font-medium text-rose-400">
-                      {game.deaths.map((seat) => `${seat}号玩家死亡`).join('、')}
-                    </p>
-                    <p className="mt-2 text-sm text-slate-400">
-                      请按规则处理死亡玩家的身份牌
-                    </p>
-                  </>
-                ) : (
-                  <p className="mt-3 text-lg font-medium text-emerald-400">
-                    昨晚是平安夜
-                  </p>
-                )}
-
-                {game.dayStage === 'deaths' && (
-                  <button
-                    type="button"
-                    onClick={startVote}
-                    className="mt-6 w-full rounded-2xl bg-amber-500 py-2 text-sm font-bold text-slate-950 shadow-lg shadow-amber-500/30 transition active:scale-95"
-                  >
-                    发起投票
-                  </button>
-                )}
-
-                {game.dayStage === 'vote' && (
-                  <>
-                    <p className="mt-5 text-sm font-bold">投票放逐（点选被放逐玩家）</p>
-                    <div className="mt-3 grid grid-cols-4 gap-3">
-                      {seats.map((seat) => (
-                        <button
-                          key={seat}
-                          type="button"
-                          onClick={() => setVoteSeat(seat)}
-                          className={`rounded-lg py-1.5 text-xs font-bold transition active:scale-95 ${
-                            voteSeat === seat
-                              ? 'bg-amber-500 text-slate-950'
-                              : 'border border-slate-700 bg-slate-950 text-slate-300'
-                          }`}
-                        >
-                          {seat}号
-                        </button>
-                      ))}
-                    </div>
-                    <div className="mt-4 flex flex-col gap-3">
-                      <button
-                        type="button"
-                        onClick={confirmExile}
-                        disabled={voteSeat === null}
-                        className="w-full rounded-xl bg-rose-500 py-2 text-sm font-bold text-slate-950 transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        确认放逐{voteSeat !== null ? ` ${voteSeat}号玩家` : ''}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={markTie}
-                        className="w-full rounded-2xl bg-slate-700 py-2 text-sm font-bold text-slate-100 transition active:scale-95"
-                      >
-                        标记平票（无人出局）
-                      </button>
-                      <button
-                        type="button"
-                        onClick={cancelVote}
-                        className="w-full rounded-2xl border border-slate-700 py-2 text-sm font-bold text-slate-300 transition active:scale-95"
-                      >
-                        取消投票
-                      </button>
-                    </div>
-                  </>
-                )}
-
-                {game.dayStage === 'exile' && game.exiledSeat !== null && (
-                  <>
-                    <p className="mt-5 text-lg font-bold text-rose-400">
-                      {game.exiledSeat}号玩家被放逐
-                    </p>
-                    <p className="mt-0.5 text-xs text-slate-400">该玩家是否有遗言？</p>
-                    <div className="mt-4 flex flex-col gap-3">
-                      <button
-                        type="button"
-                        onClick={() => handleLastWords(true)}
-                        className="w-full rounded-2xl bg-amber-500 py-2 text-sm font-bold text-slate-950 transition active:scale-95"
-                      >
-                        有遗言
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleLastWords(false)}
-                        className="w-full rounded-2xl bg-slate-700 py-2 text-sm font-bold text-slate-100 transition active:scale-95"
-                      >
-                        无遗言
-                      </button>
-                    </div>
-                  </>
-                )}
-
-                {game.dayStage === 'gun' && game.exiledSeat !== null && (
-                  <>
-                    <p className="mt-5 text-lg font-bold">
-                      {`${game.exiledSeat}号玩家是${exiledRole?.name ?? '该角色'}，是否${gunActionLabel}？`}
-                    </p>
-                    {!gunArming ? (
-                      <div className="mt-4 flex flex-col gap-3">
-                        <button
-                          type="button"
-                          onClick={() => setGunArming(true)}
-                          className="w-full rounded-xl bg-rose-500 py-2 text-sm font-bold text-slate-950 transition active:scale-95"
-                        >
-                          {gunActionLabel}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={handleGunNoShoot}
-                          className="w-full rounded-2xl bg-slate-700 py-2 text-sm font-bold text-slate-100 transition active:scale-95"
-                        >
-                          不{gunActionLabel}
-                        </button>
-                      </div>
-                    ) : (
-                      <>
-                        <p className="mt-4 text-sm text-slate-400">
-                          点击座位选择{gunActionLabel}带走的玩家
-                        </p>
-                        <div className="mt-2 grid grid-cols-4 gap-3">
-                          {seats.map((seat) => (
+                  {game.dayStage === 'vote' && (
+                    <>
+                      <p className="text-sm font-black text-slate-100">投票放逐（点选一名玩家）</p>
+                      <div className="mt-1.5 grid grid-cols-6 gap-1.5">
+                        {seats
+                          .filter((seat) => !judgeGraveyard.includes(seat))
+                          .map((seat) => (
                             <button
                               key={seat}
                               type="button"
-                              onClick={() => handleGunShoot(seat)}
-                              className="rounded-xl border border-slate-700 bg-slate-950 py-3 text-sm font-bold text-slate-300 transition active:scale-95"
+                              onClick={() => setVoteSeat(seat)}
+                              className={`rounded-lg py-2 text-xs font-bold active:scale-95 ${
+                                voteSeat === seat
+                                  ? 'bg-amber-500 text-slate-950'
+                                  : 'border border-slate-700 bg-slate-900 text-slate-300'
+                              }`}
                             >
                               {seat}号
                             </button>
                           ))}
-                        </div>
+                      </div>
+                      <div className="mt-2.5 grid grid-cols-3 gap-1.5">
                         <button
                           type="button"
-                          onClick={() => setGunArming(false)}
-                          className="mt-4 w-full rounded-2xl border border-slate-700 py-2 text-sm font-bold text-slate-300 transition active:scale-95"
+                          onClick={confirmExile}
+                          disabled={voteSeat === null}
+                          className="rounded-lg bg-rose-500 py-2 text-xs font-bold text-slate-950 active:scale-95 disabled:opacity-40"
                         >
-                          取消{gunActionLabel}
+                          确认放逐{voteSeat !== null ? ` ${voteSeat}号` : ''}
                         </button>
-                      </>
-                    )}
-                  </>
-                )}
-
-                {game.dayStage === 'summary' && (
-                  <>
-                    <p className="mt-5 text-lg font-bold text-emerald-400">
-                      白天流程完成
-                    </p>
-                    <ul className="mt-3 flex flex-col gap-2">
-                      {game.dayLog.map((note, index) => (
-                        <li
-                          key={index}
-                          className="rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-300"
+                        <button
+                          type="button"
+                          onClick={markTie}
+                          className="rounded-lg bg-slate-700 py-2 text-xs font-bold text-slate-100 active:scale-95"
                         >
-                          {note}
-                        </li>
-                      ))}
-                    </ul>
+                          平票
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelVote}
+                          className="rounded-lg border border-slate-700 py-2 text-xs font-bold text-slate-300 active:scale-95"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </>
+                  )}
+
+                  {game.dayStage === 'exile' && game.exiledSeat !== null && (
+                    <>
+                      <p className="text-sm font-black text-rose-300">
+                        {game.exiledSeat}号被放逐，是否有遗言？
+                      </p>
+                      <div className="mt-2.5 grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleLastWords(true)}
+                          className="rounded-xl bg-amber-500 py-2.5 text-sm font-bold text-slate-950 active:scale-95"
+                        >
+                          有遗言
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleLastWords(false)}
+                          className="rounded-xl bg-slate-700 py-2.5 text-sm font-bold text-slate-100 active:scale-95"
+                        >
+                          无遗言
+                        </button>
+                      </div>
+                    </>
+                  )}
+
+                  {game.dayStage === 'gun' && game.exiledSeat !== null && (
+                    <>
+                      <p className="text-sm font-black text-slate-100">
+                        {game.exiledSeat}号是{exiledRole?.name ?? '该角色'}，是否{gunActionLabel}？
+                      </p>
+                      {!gunArming ? (
+                        <div className="mt-2.5 grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setGunArming(true)}
+                            className="rounded-xl bg-rose-500 py-2.5 text-sm font-bold text-slate-950 active:scale-95"
+                          >
+                            {gunActionLabel}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleGunNoShoot}
+                            className="rounded-xl bg-slate-700 py-2.5 text-sm font-bold text-slate-100 active:scale-95"
+                          >
+                            不{gunActionLabel}
+                          </button>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="mt-1.5 grid grid-cols-6 gap-1.5">
+                            {seats
+                              .filter(
+                                (seat) =>
+                                  !judgeGraveyard.includes(seat) && seat !== game.exiledSeat,
+                              )
+                              .map((seat) => (
+                                <button
+                                  key={seat}
+                                  type="button"
+                                  onClick={() => handleGunShoot(seat)}
+                                  className="rounded-lg border border-slate-700 bg-slate-900 py-2 text-xs font-bold text-slate-300 active:scale-95"
+                                >
+                                  {seat}号
+                                </button>
+                              ))}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setGunArming(false)}
+                            className="mt-2 w-full rounded-lg border border-slate-700 py-2 text-xs font-bold text-slate-300 active:scale-95"
+                          >
+                            取消{gunActionLabel}
+                          </button>
+                        </>
+                      )}
+                    </>
+                  )}
+
+                  {game.dayStage === 'summary' && (
+                    <>
+                      <p className="text-sm font-black text-emerald-300">白天流程完成</p>
+                      <ul className="mt-1.5 max-h-[24dvh] space-y-1 overflow-y-auto">
+                        {game.dayLog.map((note, index) => (
+                          <li
+                            key={index}
+                            className="rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs text-slate-300"
+                          >
+                            {note}
+                          </li>
+                        ))}
+                      </ul>
+                      <button
+                        type="button"
+                        onClick={enterNight}
+                        className="mt-2.5 w-full rounded-xl bg-amber-500 py-2.5 text-sm font-bold text-slate-950 active:scale-95"
+                      >
+                        进入黑夜
+                      </button>
+                    </>
+                  )}
+                </>
+              )}
+            </section>
+
+            {/* 行动记录弹层（夜晚记录 + 白天记录 + 重置回配牌） */}
+            {showJudgeLog && (
+              <div
+                className="fixed inset-0 z-50 flex items-end justify-center bg-black/60"
+                onClick={() => setShowJudgeLog(false)}
+              >
+                <div
+                  className="max-h-[70dvh] w-full max-w-[480px] overflow-y-auto rounded-t-2xl border-t border-slate-700 bg-slate-900 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="flex items-center justify-between">
+                    <p className="text-base font-black text-slate-100">行动记录</p>
                     <button
                       type="button"
-                      onClick={enterNight}
-                      className="mt-5 w-full rounded-2xl bg-amber-500 py-2 text-sm font-bold text-slate-950 shadow-lg shadow-amber-500/30 transition active:scale-95"
+                      onClick={() => setShowJudgeLog(false)}
+                      className="text-slate-400"
                     >
-                      进入黑夜
+                      ✕
                     </button>
-                  </>
-                )}
-              </section>
+                  </div>
+                  <p className="mt-3 text-xs font-bold text-slate-400">第 {game.dayCount} 夜</p>
+                  <ul className="mt-1 space-y-1">
+                    {game.nightLog.length === 0 && (
+                      <li className="text-xs text-slate-600">暂无</li>
+                    )}
+                    {game.nightLog.map((action, index) => (
+                      <li
+                        key={index}
+                        className="rounded-lg bg-slate-950 px-2.5 py-1.5 text-xs text-slate-300"
+                      >
+                        <span className="text-slate-500">{action.stepName}：</span>
+                        {action.note}
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="mt-3 text-xs font-bold text-slate-400">白天记录</p>
+                  <ul className="mt-1 space-y-1">
+                    {game.dayLog.length === 0 && <li className="text-xs text-slate-600">暂无</li>}
+                    {game.dayLog.map((note, index) => (
+                      <li
+                        key={index}
+                        className="rounded-lg bg-slate-950 px-2.5 py-1.5 text-xs text-slate-300"
+                      >
+                        {note}
+                      </li>
+                    ))}
+                  </ul>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowJudgeLog(false)
+                      resetGame()
+                    }}
+                    className="mt-4 w-full rounded-xl border border-slate-700 py-2.5 text-sm font-bold text-slate-300 active:scale-95"
+                  >
+                    重置游戏（返回配牌）
+                  </button>
+                </div>
+              </div>
             )}
-
-            {game.nightLog.length > 0 && (
-              <section className="mt-8">
-                <h2 className="text-sm font-medium text-slate-400">
-                  夜晚操作记录
-                </h2>
-                <ul className="mt-3 flex flex-col gap-2">
-                  {game.nightLog.map((action, index) => (
-                    <li
-                      key={index}
-                      className="rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-slate-300"
-                    >
-                      <span className="text-slate-500">{action.stepName}：</span>
-                      {action.note}
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            )}
-
-            {game.phase === 'day' && game.dayLog.length > 0 && (
-              <section className="mt-8">
-                <h2 className="text-sm font-medium text-slate-400">白天记录</h2>
-                <ul className="mt-3 flex flex-col gap-2">
-                  {game.dayLog.map((note, index) => (
-                    <li
-                      key={index}
-                      className="rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-slate-300"
-                    >
-                      {note}
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            )}
-
-            <button
-              type="button"
-              onClick={() => setShowRecap(true)}
-              className="mt-10 w-full rounded-2xl bg-rose-500 py-2 text-sm font-bold text-slate-950 shadow-lg shadow-rose-500/30 transition active:scale-95"
-            >
-              结束游戏（复盘）
-            </button>
-            <button
-              type="button"
-              onClick={resetGame}
-              className="mt-4 w-full rounded-2xl border border-slate-700 py-2 text-sm font-bold text-slate-300 transition active:scale-95"
-            >
-              重置游戏
-            </button>
           </>
         )}
       </div>

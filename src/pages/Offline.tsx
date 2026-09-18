@@ -25,6 +25,9 @@ interface OfflineState {
   gunSource: number | null
   dayLog: string[]
   deadSeats: number[]
+  /** 整局用药状态：解药/毒药是否已用（跨晚保留，整局各一瓶） */
+  witchSaveUsed: boolean
+  witchPoisonUsed: boolean
 }
 
 const STORAGE_KEY = 'werewolf-offline-judge'
@@ -55,6 +58,8 @@ function emptyState(): OfflineState {
     gunSource: null,
     dayLog: [],
     deadSeats: [],
+    witchSaveUsed: false,
+    witchPoisonUsed: false,
   }
 }
 
@@ -117,6 +122,8 @@ function Offline() {
   const [target, setTarget] = useState<number | null>(null)
   const [witchChoice, setWitchChoice] = useState<'save' | 'poison' | 'none' | null>(null)
   const [witchPoisonTarget, setWitchPoisonTarget] = useState<number | null>(null)
+  /** 撤销历史栈：每次改变游戏状态前把旧状态压栈，可连续撤回直到开局 */
+  const [history, setHistory] = useState<OfflineState[]>([])
 
   useEffect(() => {
     try {
@@ -126,13 +133,31 @@ function Offline() {
     }
   }, [state])
 
-  const persist = (next: OfflineState) => setState(next)
+  const persist = (next: OfflineState) => {
+    // 每次游戏状态变更前快照当前状态，供撤回
+    setHistory((h) => [...h, state])
+    setState(next)
+  }
+
+  /** 撤回上一步：弹出最近一次快照并恢复，可连续撤回直至游戏开始 */
+  const undo = () => {
+    if (history.length === 0) return
+    const prev = history[history.length - 1]
+    setHistory(history.slice(0, -1))
+    setState(prev)
+    setActiveStep(null)
+    setTarget(null)
+    setWitchChoice(null)
+    setWitchPoisonTarget(null)
+  }
 
   // ---- 生成座位 ----
   const generate = () => {
     const n = Math.min(18, Math.max(6, playerInput))
     const deck = buildOfflineDeck(board, n)
-    persist({ ...emptyState(), playerCount: n, seats: deck, phase: 'night' })
+    // 新一局开始：清空撤销栈，可撤回范围从开局后第一步算起
+    setHistory([])
+    setState({ ...emptyState(), playerCount: n, seats: deck, phase: 'night' })
     setActiveStep(null)
   }
 
@@ -190,10 +215,16 @@ function Offline() {
   }
 
   const witchTargetSeat = state.nightLog.find((a) => a.stepKey === 'werewolf')?.target ?? null
+  /** 女巫自己的座位（上帝视角已知），用于"不能自救"判定 */
+  const witchSeat = state.seats?.find((s) => s.key === 'witch')?.seat ?? null
+  /** 今晚刀口若是女巫本人，则不可用解药自救 */
+  const witchUnderAttack = witchTargetSeat !== null && witchTargetSeat === witchSeat
 
   const submitWitch = () => {
     if (!witchChoice) return
     if (witchChoice === 'poison' && witchPoisonTarget === null) return
+    // 自救拦截：刀口是女巫自己时不允许选解药（兜底，UI 也已置灰）
+    if (witchChoice === 'save' && witchUnderAttack) return
     const t = witchChoice === 'poison' ? witchPoisonTarget : witchChoice === 'save' ? witchTargetSeat : null
     const note =
       witchChoice === 'save'
@@ -201,7 +232,22 @@ function Offline() {
         : witchChoice === 'poison'
           ? `女巫毒 ${witchPoisonTarget}号`
           : '女巫不用药'
-    recordAction('witch', note, t)
+    const action: NightAction = {
+      stepKey: 'witch',
+      stepName: '女巫',
+      note,
+      target: t,
+      kills: witchChoice === 'poison',
+      saves: witchChoice === 'save',
+    }
+    persist({
+      ...state,
+      nightLog: [...state.nightLog.filter((a) => a.stepKey !== 'witch'), action],
+      // 整局各一瓶药：用过就永久置灰
+      witchSaveUsed: state.witchSaveUsed || witchChoice === 'save',
+      witchPoisonUsed: state.witchPoisonUsed || witchChoice === 'poison',
+    })
+    setActiveStep(null)
   }
 
   // ---- 天亮 / 白天 ----
@@ -264,6 +310,7 @@ function Offline() {
 
   const resetAll = () => {
     localStorage.removeItem(STORAGE_KEY)
+    setHistory([])
     setState(emptyState())
     setActiveStep(null)
   }
@@ -275,7 +322,7 @@ function Offline() {
   return (
     <div className="min-h-dvh w-full bg-slate-950 px-4 py-6 pb-16 text-slate-100">
       <div className="mx-auto max-w-lg">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <button
             type="button"
             onClick={() => navigate('/')}
@@ -284,13 +331,23 @@ function Offline() {
             ← 返回
           </button>
           <h1 className="text-2xl font-black">线下法官模式</h1>
-          <button
-            type="button"
-            onClick={resetAll}
-            className="rounded-xl border border-rose-500/40 px-4 py-2 text-sm font-medium text-rose-300 active:scale-95"
-          >
-            重置
-          </button>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={undo}
+              disabled={history.length === 0}
+              className="rounded-xl border border-amber-500/40 px-4 py-2 text-sm font-medium text-amber-300 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              ↩ 撤回
+            </button>
+            <button
+              type="button"
+              onClick={resetAll}
+              className="rounded-xl border border-rose-500/40 px-4 py-2 text-sm font-medium text-rose-300 active:scale-95"
+            >
+              重置
+            </button>
+          </div>
         </div>
         <p className="mt-2 text-center text-xs text-slate-500">
           法官平板上帝视角 · 完全本地，不影响线上房间
@@ -477,33 +534,52 @@ function Offline() {
 
                     {step.key === 'witch' && (
                       <div className="mt-4">
-                        <p className="text-xs text-slate-400">
+                        <p className="text-center text-sm font-bold text-purple-300">
+                          解药x{state.witchSaveUsed ? 0 : 1} | 毒药x{state.witchPoisonUsed ? 0 : 1}
+                        </p>
+                        <p className="mt-2 text-xs text-slate-400">
                           {witchTargetSeat !== null
                             ? `狼人今晚刀的是 ${witchTargetSeat}号`
                             : '今晚平安夜（无人被刀）'}
                         </p>
+                        {witchUnderAttack && (
+                          <p className="mt-1 text-xs font-medium text-rose-400">
+                            你今晚被刀了，不能自救，只能选择用毒药或不用药。
+                          </p>
+                        )}
                         <div className="mt-2 flex flex-col gap-2">
                           <button
                             type="button"
+                            disabled={
+                              state.witchSaveUsed ||
+                              witchUnderAttack ||
+                              witchChoice === 'poison' ||
+                              witchChoice === 'none'
+                            }
                             onClick={() => setWitchChoice('save')}
-                            className={`rounded-xl py-3 text-sm font-bold transition active:scale-95 ${
+                            className={`rounded-xl py-3 text-sm font-bold transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 ${
                               witchChoice === 'save'
                                 ? 'bg-emerald-500 text-slate-950'
                                 : 'border border-slate-700 text-slate-200'
                             }`}
                           >
-                            救 {witchTargetSeat ?? '—'}号（解药）
+                            使用解药：救 {witchTargetSeat ?? '—'}号
                           </button>
                           <button
                             type="button"
+                            disabled={
+                              state.witchPoisonUsed ||
+                              witchChoice === 'save' ||
+                              witchChoice === 'none'
+                            }
                             onClick={() => setWitchChoice('poison')}
-                            className={`rounded-xl py-3 text-sm font-bold transition active:scale-95 ${
+                            className={`rounded-xl py-3 text-sm font-bold transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 ${
                               witchChoice === 'poison'
                                 ? 'bg-rose-500 text-slate-950'
                                 : 'border border-slate-700 text-slate-200'
                             }`}
                           >
-                            用毒药
+                            使用毒药
                           </button>
                           <button
                             type="button"
@@ -514,7 +590,7 @@ function Offline() {
                                 : 'border border-slate-700 text-slate-200'
                             }`}
                           >
-                            不用药
+                            本轮不使用任何药水
                           </button>
                         </div>
                         {witchChoice === 'poison' && (
@@ -576,22 +652,33 @@ function Offline() {
                             </div>
                           </>
                         )}
-                        <button
-                          type="button"
-                          onClick={() =>
-                            recordAction(
-                              step.key,
-                              step.needTarget
-                                ? `${step.name}操作 ${target ?? '—'}号`
-                                : `${step.name}已完成（无需目标）`,
-                              target,
-                            )
-                          }
-                          disabled={step.needTarget && target === null}
-                          className="mt-4 w-full rounded-xl bg-amber-500 py-3.5 text-base font-bold text-slate-950 transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
-                        >
-                          记录{step.name}操作
-                        </button>
+                        <div className="mt-4 flex flex-col gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              recordAction(
+                                step.key,
+                                step.needTarget
+                                  ? `${step.name}操作 ${target ?? '—'}号`
+                                  : `${step.name}已完成（无需目标）`,
+                                target,
+                              )
+                            }
+                            disabled={step.needTarget && target === null}
+                            className="w-full rounded-xl bg-amber-500 py-3.5 text-base font-bold text-slate-950 transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            记录{step.name}操作
+                          </button>
+                          {step.canSkip && (
+                            <button
+                              type="button"
+                              onClick={() => recordAction(step.key, `${step.name}不使用技能（空过）`, null)}
+                              className="w-full rounded-xl border border-slate-600 py-3 text-sm font-bold text-slate-300 transition active:scale-95"
+                            >
+                              不使用技能（空过）
+                            </button>
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>

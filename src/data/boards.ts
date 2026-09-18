@@ -27,6 +27,7 @@ export const boards: Board[] = [
       { key: 'seer', name: '预言家', count: 1, camp: 'good' },
       { key: 'witch', name: '女巫', count: 1, camp: 'good' },
       { key: 'hunter', name: '猎人', count: 1, camp: 'good' },
+      { key: 'demon_hunter', name: '猎魔人', count: 1, camp: 'good' },
       { key: 'dream_weaver', name: '摄梦人', count: 1, camp: 'good' },
       { key: 'raven', name: '乌鸦', count: 1, camp: 'good' },
       { key: 'cursed_fox', name: '咒狐', count: 1, camp: 'third' },
