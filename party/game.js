@@ -2110,10 +2110,14 @@ export default class GameServer {
     /** 殉情：情侣一方出局 -> 另一方跟着出局（链式）；丘比特连接的两人整局固定 */
     applyLoversDeath(room, deaths) {
         const gs = room.gameState;
-        const pair = gs.cupidTargets;
-        if (!pair)
+        // 断链规则：链子情侣排除咒狐（咒狐永不参与情侣链接/殉情）
+        const lovers = (gs.cupidTargets ?? []).filter((seat) => {
+            const r = gs.seats.find((s) => s.seat === seat);
+            return r != null && r.roleKey !== 'cursed_fox';
+        });
+        if (lovers.length < 2)
             return;
-        const [a, b] = pair;
+        const [a, b] = lovers;
         for (const seatNo of [...deaths]) {
             if (seatNo !== a && seatNo !== b)
                 continue;
@@ -2187,73 +2191,45 @@ export default class GameServer {
         if (gs.phase === 'over')
             return true;
         const alive = gs.seats.filter((s) => !gs.deadSeats.includes(s.seat));
-        const wolves = alive.filter((s) => s.camp === 'wolf').length;
-        const good = alive.filter((s) => s.camp === 'good').length;
-        const cursedFoxAlive = alive.some((s) => s.roleKey === 'cursed_fox');
-        const pair = gs.cupidTargets;
-        let thirdActive = false;
-        let pairAllDead = true;
-        let foxLinked = false;
-        let pairKind = null; // 'gg'=双好  'ww'=双狼  'gw'=好+狼  'third'=含第三方/可变阵营
-        const cupidSeat = gs.seats.find((s) => s.roleKey === 'cupid');
-        // 活人统计（按座位原生 camp）
-        let wolfCount = alive.filter((s) => s.camp === 'wolf').length;
-        // 觉醒孤独少女：偶像出局前始终视为平民（好人），变身后才改 camp
-        let goodCount = alive.filter((s) => s.camp === 'good' || (s.roleKey === 'lonely_girl' && !gs.lonelyConverted)).length;
-        if (pair) {
-            const [a, b] = pair;
-            const aSeat = gs.seats.find((s) => s.seat === a);
-            const bSeat = gs.seats.find((s) => s.seat === b);
-            const aAlive = alive.some((s) => s.seat === a);
-            const bAlive = alive.some((s) => s.seat === b);
-            pairAllDead = !aAlive && !bAlive;
-            if (aSeat && bSeat) {
-                const aC = aSeat.camp, bC = bSeat.camp;
-                const pairHasThird = aSeat.roleKey === 'cursed_fox' || bSeat.roleKey === 'cursed_fox' ||
-                    aSeat.roleKey === 'lonely_girl' || bSeat.roleKey === 'lonely_girl';
-                if (pairHasThird) {
-                    pairKind = 'third';
-                    foxLinked = aSeat.roleKey === 'cursed_fox' || bSeat.roleKey === 'cursed_fox';
-                }
-                else if (aC === 'good' && bC === 'good') pairKind = 'gg';
-                else if (aC === 'wolf' && bC === 'wolf') pairKind = 'ww';
-                else pairKind = 'gw';
-                if ((pairKind === 'gw' || pairKind === 'third') && (aAlive || bAlive)) thirdActive = true;
-                // 丘比特随链：双好->好人，双狼->狼人，人狼/第三方->第三方
-                if (cupidSeat && !gs.deadSeats.includes(cupidSeat.seat)) {
-                    if (pairKind === 'gg') goodCount += 1;
-                    else if (pairKind === 'ww') wolfCount += 1;
-                }
-            }
-        }
-        // 第三方优先：第三方成员=情侣两人+存活丘比特；其余全出局则第三方胜
-        if (thirdActive) {
-            const thirdSeats = new Set();
-            if (pair) { thirdSeats.add(pair[0]); thirdSeats.add(pair[1]); }
-            if (cupidSeat && !gs.deadSeats.includes(cupidSeat.seat)) thirdSeats.add(cupidSeat.seat);
-            const outside = alive.filter((s) => !thirdSeats.has(s.seat));
-            if (outside.length === 0) {
-                this.gameOver(room, 'third', '第三方阵营');
+        // 独立（第4方）：咒狐（断链规则：咒狐永不参与情侣链接，仍第4方独立阵营）
+        const foxAlive = alive.some((s) => s.roleKey === 'cursed_fox');
+        // 有效链子：排除咒狐
+        const lovers = (gs.cupidTargets ?? []).filter((seat) => {
+            const r = gs.seats.find((s) => s.seat === seat);
+            return r != null && r.roleKey !== 'cursed_fox';
+        });
+        // 第三方（第3方）：丘比特 + 有效链子情侣
+        const thirdSeats = new Set();
+        gs.seats.forEach((s) => { if (s.roleKey === 'cupid') thirdSeats.add(s.seat); });
+        lovers.forEach((seat) => thirdSeats.add(seat));
+        const thirdAlive = alive.filter((s) => thirdSeats.has(s.seat));
+        // 好人（第1方）与狼人（第2方），均排除第三方成员；未变身孤独少女视为好人
+        const goodAlive = alive.filter((s) =>
+            (s.camp === 'good' || (s.roleKey === 'lonely_girl' && !gs.lonelyConverted)) && !thirdSeats.has(s.seat));
+        const wolfAlive = alive.filter((s) => s.camp === 'wolf' && !thirdSeats.has(s.seat));
+        const wolvesDead = wolfAlive.length === 0;
+        const goodDead = goodAlive.length === 0;
+        // 第1优先级：咒狐存活时，好人/狼人/第三方都不能赢，只有咒狐赢（篡改胜利）
+        if (foxAlive) {
+            if (wolvesDead || goodDead) {
+                this.gameOver(room, 'cursed_fox', '咒狐阵营');
                 return true;
             }
+            return false;
         }
-        // 好人胜利：狼全灭；咒狐未被连时篡改胜利
-        if (wolfCount === 0 && (!thirdActive || pairAllDead)) {
-            if (cursedFoxAlive && !foxLinked) {
-                this.gameOver(room, 'cursed_fox', '咒狐阵营');
-            } else {
-                this.gameOver(room, 'good', '好人阵营');
-            }
+        // 第2优先级：第三方胜利（狼灭且好灭，场上仅剩第三方）
+        if (wolvesDead && goodDead) {
+            this.gameOver(room, 'third', '第三方阵营');
             return true;
         }
-        // 狼人胜利：存活狼 >= 存活非狼总数；咒狐未被连时篡改胜利
-        const nonWolf = alive.length - wolfCount;
-        if (wolfCount > 0 && wolfCount >= nonWolf && (!thirdActive || pairAllDead)) {
-            if (cursedFoxAlive && !foxLinked) {
-                this.gameOver(room, 'cursed_fox', '咒狐阵营');
-            } else {
-                this.gameOver(room, 'wolf', '狼人阵营');
-            }
+        // 第3优先级：好人胜利（狼灭且第三方灭）
+        if (wolvesDead && thirdAlive.length === 0) {
+            this.gameOver(room, 'good', '好人阵营');
+            return true;
+        }
+        // 第4优先级：狼人胜利（好灭且第三方灭）
+        if (goodDead && thirdAlive.length === 0) {
+            this.gameOver(room, 'wolf', '狼人阵营');
             return true;
         }
         return false;
