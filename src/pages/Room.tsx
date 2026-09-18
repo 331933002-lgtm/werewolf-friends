@@ -723,6 +723,10 @@ function Room() {
       if (key === 'lonely_girl' && game.dayCount > 1) {
         return { ...base, needTarget: false, prompt: '喊：孤独少女睁眼确认（第一晚已选崇拜，后续无需操作）。' }
       }
+      // 猎魔人：第一晚睁眼但不能使用技能，第二晚起才可狩猎
+      if (key === 'demon_hunter' && game.dayCount === 1) {
+        return { ...base, needTarget: false, prompt: '喊：猎魔人睁眼确认（第一晚不能使用技能，第二晚起才可狩猎）。' }
+      }
       return base
     })
   const currentStep = nightSteps[game.nightIndex]
@@ -731,6 +735,8 @@ function Room() {
   const seats = Array.from({ length: seatCount }, (_, index) => index + 1)
   /** 线下法官助手：累计出局座位（死亡/放逐/开枪） */
   const judgeGraveyard = game.graveyard ?? []
+  const safeNightLog = game.nightLog ?? []
+  const safeDeal = game.deal ?? []
   const exiledRole =
     game.exiledSeat !== null
       ? game.deal.find((role) => role.seat === game.exiledSeat)
@@ -790,6 +796,7 @@ function Room() {
   /** 线下法官助手：边走边分配，法官喊到哪个角色就在手机上选座位 */
   const startJudgeGame = () => {
     setGameHistory([])
+    setOnlineStarted(true)
     setGame({ ...EMPTY_GAME, deal: [], phase: 'night', dayCount: 1 })
     setNightTargets([])
     setWitchChoice(null)
@@ -803,6 +810,7 @@ function Room() {
   const resetGame = () => {
     setGameHistory([])
     clearSavedGame(roomId ?? '')
+    setOnlineStarted(false)
     setGame({ ...EMPTY_GAME })
     setNightTargets([])
     setWitchChoice(null)
@@ -923,34 +931,39 @@ function Room() {
         const loversAction = nextLog.find((a) => a.stepKey === 'cupid')
         const lovers = loversAction?.targets ?? prev.lovers ?? []
         const dreamAction = nextLog.find((a) => a.stepKey === 'dream_weaver')
-        const prevDreamTarget = dreamAction?.target ?? null
+        // 连续两晚判定：结算时用上一晚目标（prev.prevDreamTarget），不能误用本晚目标
+        const prevDreamTargetForCheck = prev.prevDreamTarget ?? null
         const witchAction = nextLog.find((a) => a.stepKey === 'witch')
         const witchAntidoteUsed = prev.witchAntidoteUsed || (witchAction?.saves ?? false)
         const witchPoisonUsed = prev.witchPoisonUsed || (witchAction?.kills ?? false)
-        const deathList = computeDeaths(nextLog, { deal: prev.deal, graveyard: prev.graveyard ?? [], lovers, prevDreamTarget })
+        const nightmareAction = nextLog.find((a) => a.stepKey === 'nightmare')
+        const prevNightmareTarget = nightmareAction?.target ?? null
+        const wolfQueenAction = nextLog.find((a) => a.stepKey === 'wolf_queen')
+        const prevWolfQueenTarget = wolfQueenAction?.target ?? null
+        const deathList = computeDeaths(nextLog, { deal: prev.deal, graveyard: prev.graveyard ?? [], lovers, prevDreamTarget: prevDreamTargetForCheck })
         // BUG3：夜间死亡的猎人/狼王，天亮宣布死讯后可开枪（不翻牌）
         const nightGunShooter = deathList.find((seat) => {
           const r = prev.deal.find((item) => item.seat === seat)
           return r && (r.key === 'hunter' || r.key === 'wolf_king')
         }) ?? null
+        const isFirstNight = prev.dayCount === 1
         return {
           ...prev,
           nightLog: nextLog,
           phase: 'day',
           deaths: deathList,
           lovers,
-          prevDreamTarget,
+          prevDreamTarget: dreamAction?.target ?? null,
           witchAntidoteUsed,
           witchPoisonUsed,
           prevNightmareTarget,
           prevWolfQueenTarget,
           nightGunShooter,
-          dayStage: prev.dayCount === 1 ? 'sheriff' : (nightGunShooter !== null ? 'nightGun' : 'deaths'),
+          dayStage: isFirstNight ? 'sheriff' : (nightGunShooter !== null ? 'nightGun' : 'deaths'),
           exiledSeat: null,
           exileHasLastWords: null,
-          graveyard: [
-            ...new Set([...(prev.graveyard ?? []), ...computeDeaths(nextLog)]),
-          ],
+          // 第一晚先上警，暂不把死亡玩家加入 graveyard；等 sheriff 结束进入 deaths 时再加入
+          graveyard: isFirstNight ? (prev.graveyard ?? []) : [...new Set([...(prev.graveyard ?? []), ...deathList])],
         }
       }
       return { ...prev, nightLog: nextLog, nightIndex: prev.nightIndex + 1 }
@@ -1434,8 +1447,8 @@ function Room() {
   const aliveSeatInfo = onlineSeats.filter((s) => !deadSeats.includes(s.seat))
 
   return (
-    <div className={`flex w-full flex-col bg-slate-950 text-slate-100 ${onlineStarted ? 'h-dvh overflow-hidden px-3 py-3' : 'min-h-dvh px-6 py-10'}`}>
-      <div className={`mx-auto w-full max-w-[480px] ${onlineStarted ? '' : 'pb-40'}`}>
+    <div className={`flex w-full flex-col bg-slate-950 text-slate-100 ${onlineStarted && !isDemo ? 'h-dvh overflow-hidden px-3 py-3' : 'min-h-dvh px-6 py-10'}`}>
+      <div className={`mx-auto w-full max-w-[480px] ${onlineStarted && !isDemo ? '' : 'pb-40'}`}>
         {/* 孤独少女变身/继承提示 */}
         {convertNotice && (
           <div className="mb-4 rounded-2xl border border-sky-500/40 bg-sky-500/10 p-4 text-center">
@@ -1848,7 +1861,7 @@ function Room() {
           </section>
         )}
 
-        {onlineStarted && (
+        {onlineStarted && !isDemo && (
           <section className="mt-8">
             <div className="flex items-center justify-between">
               <button
@@ -1991,7 +2004,7 @@ function Room() {
           </section>
         )}
 
-        {onlineStarted && gameOverInfo && (
+        {onlineStarted && !isDemo && gameOverInfo && (
           <div className="mt-8 flex flex-col gap-3">
             {isHost ? (
               <button
@@ -2013,7 +2026,7 @@ function Room() {
         )}
 
         {/* 投票记录折叠按钮：悬浮右下角不占布局，展开弹层复盘历史放逐投票 */}
-        {onlineStarted && (
+        {onlineStarted && !isDemo && (
           <>
             <button
               type="button"
@@ -2088,7 +2101,7 @@ function Room() {
           </div>
         )}
 
-        {onlineStarted && onlinePhase === 'night' && (
+        {onlineStarted && !isDemo && onlinePhase === 'night' && (
           <section className={`fixed inset-x-0 bottom-[calc(44px+max(8px,env(safe-area-inset-bottom)))] z-40 mx-auto flex max-h-[calc(58dvh-52px)] max-w-[480px] flex-col overflow-y-auto rounded-t-2xl border-t border-indigo-500/40 bg-slate-950/95 p-3 shadow-2xl backdrop-blur ${phaseDisabled && isMyPhase ? 'pointer-events-none [&_button]:opacity-40' : ''}`}>
             <div className="flex items-center justify-between">
               <p className="text-xs text-slate-400">夜晚 · 第 {onlineNightIndex} 夜</p>
@@ -2545,35 +2558,43 @@ function Room() {
               currentPhase?.requiredAction === 'demon_hunter_hunt' && (
                 <div className="mt-2 rounded-2xl border border-orange-500/40 bg-slate-950 p-2.5">
                   <p className="text-sm font-bold text-orange-400">猎魔人</p>
-                  <p className="mt-1 text-sm text-slate-300">
-                    选择一名玩家狩猎：目标是狼人则次日出局；目标是好人则你出局（不能连续两晚狩猎同一人）
-                  </p>
-                  <div className="mt-2 grid grid-cols-6 gap-1.5">
-                    {aliveSeatInfo.map((s) => (
+                  {onlineNightIndex < 2 ? (
+                    <p className="mt-1 text-sm text-slate-300">
+                      第一晚不能使用技能（第二晚起才可狩猎），请直接空过。
+                    </p>
+                  ) : (
+                    <>
+                      <p className="mt-1 text-sm text-slate-300">
+                        选择一名玩家狩猎：目标是狼人则次日出局；目标是好人则你出局（不能连续两晚狩猎同一人）
+                      </p>
+                      <div className="mt-2 grid grid-cols-6 gap-1.5">
+                        {aliveSeatInfo.map((s) => (
+                          <button
+                            key={s.seat}
+                            type="button"
+                            onClick={() =>
+                              setDemonHunterTarget(demonHunterTarget === s.seat ? null : s.seat)
+                            }
+                            className={`rounded-lg py-1.5 text-xs font-bold transition active:scale-95 ${
+                              demonHunterTarget === s.seat
+                                ? 'bg-orange-500 text-slate-950'
+                                : 'border border-slate-700 bg-slate-950 text-slate-300'
+                            }`}
+                          >
+                            {s.seat}号
+                          </button>
+                        ))}
+                      </div>
                       <button
-                        key={s.seat}
                         type="button"
-                        onClick={() =>
-                          setDemonHunterTarget(demonHunterTarget === s.seat ? null : s.seat)
-                        }
-                        className={`rounded-lg py-1.5 text-xs font-bold transition active:scale-95 ${
-                          demonHunterTarget === s.seat
-                            ? 'bg-orange-500 text-slate-950'
-                            : 'border border-slate-700 bg-slate-950 text-slate-300'
-                        }`}
+                        onClick={() => submitNightTarget('demon_hunter', demonHunterTarget)}
+                        disabled={demonHunterTarget === null}
+                        className="mt-4 w-full rounded-2xl bg-orange-500 py-2 text-sm font-bold text-slate-950 transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
                       >
-                        {s.seat}号
+                        提交狩猎
                       </button>
-                    ))}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => submitNightTarget('demon_hunter', demonHunterTarget)}
-                    disabled={demonHunterTarget === null}
-                    className="mt-4 w-full rounded-2xl bg-orange-500 py-2 text-sm font-bold text-slate-950 transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    提交狩猎
-                  </button>
+                    </>
+                  )}
                   <button
                     type="button"
                     onClick={() => submitNightTarget('demon_hunter', 0)}
@@ -2825,7 +2846,7 @@ function Room() {
         )}
 
         {/* 死讯与白天流程区：警长竞选完成后才显示（竞选期间只显示竞选界面，不提前播报死讯） */}
-        {onlineStarted && onlinePhase === 'day' && nightEnded && (
+        {onlineStarted && !isDemo && onlinePhase === 'day' && nightEnded && (
           <section className="fixed inset-x-0 bottom-[calc(44px+max(8px,env(safe-area-inset-bottom)))] z-40 mx-auto flex max-h-[calc(58dvh-52px)] max-w-[480px] flex-col overflow-y-auto rounded-t-2xl border-t border-emerald-500/40 bg-slate-950/95 p-3 shadow-2xl backdrop-blur">
             <div className="flex items-center justify-between">
               <p className="text-xs text-slate-400">白天 · 第 {nightEnded.dayIndex} 天</p>
@@ -3294,7 +3315,7 @@ function Room() {
           </section>
         )}
 
-        {game.phase !== 'waiting' && (
+        {isDemo && game.phase !== 'waiting' && (
           <>
             {/* 顶部状态条 + 座位身份格（点按查看身份，出局置灰划线） */}
             <section className="mt-4">
@@ -3471,7 +3492,9 @@ function Room() {
                     ))}
                   </p>
                   <p className="mt-0.5 text-xs leading-snug text-slate-400">
-                    {JUDGE_STEP_HINTS[currentStep.key] ?? ''}
+                    {currentStep.key === 'demon_hunter' && game.dayCount === 1
+                      ? '第一晚不能使用技能，请直接下一步（第二晚起才可狩猎）'
+                      : JUDGE_STEP_HINTS[currentStep.key] ?? ''}
                   </p>
                   {/* 边走边分配：当前角色还没分配座位时，法官临时指定 */}
                   {(() => {
@@ -3724,7 +3747,7 @@ function Room() {
                       <div className="mt-2.5 grid grid-cols-2 gap-2">
                         <button
                           type="button"
-                          onClick={() => setGame((prev) => ({ ...prev, dayStage: 'deaths' }))}
+                          onClick={() => setGame((prev) => ({ ...prev, dayStage: 'deaths', graveyard: [...new Set([...(prev.graveyard ?? []), ...(prev.deaths ?? [])])] }))}
                           className="rounded-xl bg-slate-700 py-2.5 text-sm font-bold text-slate-100 active:scale-95"
                         >
                           无人上警
@@ -3732,7 +3755,7 @@ function Room() {
                         <button
                           type="button"
                           disabled={sheriffSeat === null}
-                          onClick={() => setGame((prev) => ({ ...prev, dayStage: 'deaths' }))}
+                          onClick={() => setGame((prev) => ({ ...prev, dayStage: 'deaths', graveyard: [...new Set([...(prev.graveyard ?? []), ...(prev.deaths ?? [])])] }))}
                           className="rounded-xl bg-amber-500 py-2.5 text-sm font-bold text-slate-950 active:scale-95 disabled:opacity-40"
                         >
                           确定警长

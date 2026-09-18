@@ -892,10 +892,8 @@ export default class GameServer {
                 next++;
                 continue;
             }
-            if (phase.roleKey === 'demon_hunter' && room.gameState.dayIndex < 2) {
-                next++;
-                continue;
-            }
+            // 猎魔人：第一晚也睁眼（不能使用技能，仅可空过），第二晚起才可狩猎
+
             if (phase.roleKey === 'wolf_queen' && room.gameState.wolfQueenUsed) {
                 next++;
                 continue;
@@ -1033,7 +1031,7 @@ export default class GameServer {
             if (pSeat && pSeat.roleKey === 'demon_hunter')
                 poisonKill = null;
         }
-        // ---- 猎魔人狩猎（目标狼 -> 次日目标出局；目标好人 -> 次日猎魔人出局） ----
+        // ---- 猎魔人狩猎（目标狼 -> 次日目标出局；目标好人 -> 次日猎魔人出局；梦游者免疫狩猎） ----
         let demonKill = null;
         if (gs.demonHunterTarget !== null) {
             const tSeat = gs.seats.find((s) => s.seat === gs.demonHunterTarget);
@@ -1048,6 +1046,9 @@ export default class GameServer {
                 }
             }
         }
+        // 梦游者免疫狩猎（摄梦人保护，与免疫狼刀/毒一致）
+        if (demonKill !== null && demonKill === dreamTarget)
+            demonKill = null;
         // ---- 写入死亡 ----
         if (wolfKill !== null)
             deaths.add(wolfKill);
@@ -2441,8 +2442,15 @@ export default class GameServer {
         }
         // ---- 猎魔人：狩猎（第二晚起；不能猎自己；不能连续两晚狩猎同一玩家；可空过） ----
         if (msg.roleKey === 'demon_hunter') {
-            if (room.gameState.dayIndex < 2)
+            // 第一晚：只允许空过（target=0），不能选择狩猎目标
+            if (room.gameState.dayIndex < 2) {
+                if (msg.target !== 0)
+                    return;
+                room.gameState.demonHunterTarget = null;
+                this.acceptNightAction(room, msg.playerId);
+                this.advanceNightStep(room);
                 return;
+            }
             // target=0 表示空过（不使用技能），直接进入下一阶段
             if (msg.target === 0) {
                 room.gameState.demonHunterTarget = null;
@@ -2744,6 +2752,7 @@ export default class GameServer {
             requiredAction: phase.requiredAction,
             stepDeadline: room.gameState.stepDeadline ?? null,
             disabled: this.isNightmareTarget(room, phase.roleKey),
+            canAct: !(phase.roleKey === 'demon_hunter' && room.gameState.dayIndex < 2),
         };
         if (phase.roleKey === 'wolf') {
             for (const seat of this.phasePlayers(room, 'wolf')) {
@@ -2832,6 +2841,7 @@ export default class GameServer {
             label: phase.label,
             requiredAction: phase.requiredAction,
             disabled: this.isNightmareTarget(room, phase.roleKey),
+            canAct: !(phase.roleKey === 'demon_hunter' && room.gameState.dayIndex < 2),
         }));
         if (room.gameState.currentPhase === 'wolf' && seat.camp === 'wolf') {
             conn.send(JSON.stringify({

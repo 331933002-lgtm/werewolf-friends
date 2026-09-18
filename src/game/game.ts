@@ -223,20 +223,32 @@ export function shuffleDeal(board: Board): SeatRole[] {
   return pool.map((role, index) => ({ seat: index + 1, ...role }))
 }
 
-/** 根据夜晚操作记录计算死讯（被刀/被毒且未被解药救回） */
+/**
+ * 根据夜晚操作记录计算死讯
+ * 摄梦人规则：
+ *  - 梦游者免疫夜间伤害（狼刀/女巫毒/猎魔人狩猎均无效，除非连续两晚梦游或摄梦人出局）
+ *  - 连续两晚成为梦游者 -> 第二晚天亮出局（prevDreamTarget 必须是上一晚目标）
+ *  - 摄梦人本晚出局 -> 梦游者一并出局
+ */
 export function computeDeaths(actions: NightAction[], state?: {
   deal: SeatRole[]
   graveyard: number[]
   lovers?: number[]
   prevDreamTarget?: number | null
 }): number[] {
+  const dreamAction = actions.find((a) => a.stepKey === 'dream_weaver')
+  const dreamTarget = dreamAction?.target ?? null
   const killed = actions
     .filter((action) => action.kills && action.target !== null)
     .map((action) => action.target as number)
   const saved = actions
     .filter((action) => action.saves && action.target !== null)
     .map((action) => action.target as number)
-  const base = killed.filter((seat) => !saved.includes(seat))
+  // 梦游者免疫夜间伤害：先剔除（随后按连续两晚/摄梦人出局两条途径单独加回）
+  let base = killed.filter((seat) => !saved.includes(seat))
+  if (dreamTarget !== null) {
+    base = base.filter((seat) => seat !== dreamTarget)
+  }
   const deaths = new Set(base)
   if (state) {
     const roleOf = (seat: number) => state.deal.find((r) => r.seat === seat)
@@ -244,17 +256,29 @@ export function computeDeaths(actions: NightAction[], state?: {
     if (seerAction?.target != null && roleOf(seerAction.target)?.key === 'cursed_fox') {
       deaths.add(seerAction.target)
     }
-    const dreamAction = actions.find((a) => a.stepKey === 'dream_weaver')
-    if (dreamAction?.target != null && state.prevDreamTarget != null && dreamAction.target === state.prevDreamTarget) {
-      deaths.add(dreamAction.target)
+    // 连续两晚成为梦游者 -> 第二晚天亮出局
+    if (dreamTarget !== null && state.prevDreamTarget !== null && dreamTarget === state.prevDreamTarget) {
+      deaths.add(dreamTarget)
     }
-    // 猎魔人狩猎：目标是狼人->目标出局；目标是好人->猎魔人出局
+    // 摄梦人本晚出局（被刀/被毒/狩猎反噬等）-> 梦游者一并出局
+    const dreamerSeat = state.deal.find((r) => r.key === 'dream_weaver')?.seat
+    if (
+      dreamerSeat != null &&
+      deaths.has(dreamerSeat) &&
+      dreamTarget !== null &&
+      dreamTarget !== dreamerSeat
+    ) {
+      deaths.add(dreamTarget)
+    }
+    // 猎魔人狩猎：目标是狼人->目标出局；目标是好人->猎魔人出局；梦游者免疫狩猎
     const demonHunterAction = actions.find((a) => a.stepKey === 'demon_hunter')
     if (demonHunterAction?.target != null) {
       const demonHunterSeat = state.deal.find((r) => r.key === 'demon_hunter')?.seat
       const targetRole = roleOf(demonHunterAction.target)
       if (targetRole && targetRole.camp === 'wolf') {
-        deaths.add(demonHunterAction.target)
+        if (demonHunterAction.target !== dreamTarget) {
+          deaths.add(demonHunterAction.target)
+        }
       } else if (demonHunterSeat != null) {
         deaths.add(demonHunterSeat)
       }
