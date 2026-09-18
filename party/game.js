@@ -2197,7 +2197,8 @@ export default class GameServer {
         const cupidSeat = gs.seats.find((s) => s.roleKey === 'cupid');
         // 活人统计（按座位原生 camp）
         let wolfCount = alive.filter((s) => s.camp === 'wolf').length;
-        let goodCount = alive.filter((s) => s.camp === 'good').length;
+        // 觉醒孤独少女：偶像出局前始终视为平民（好人），变身后才改 camp
+        let goodCount = alive.filter((s) => s.camp === 'good' || (s.roleKey === 'lonely_girl' && !gs.lonelyConverted)).length;
         if (pair) {
             const [a, b] = pair;
             const aSeat = gs.seats.find((s) => s.seat === a);

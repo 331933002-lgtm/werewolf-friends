@@ -181,6 +181,16 @@ function Offline() {
     })
   }
 
+  // 淘汰/复活（仅切换存活状态，不改身份）
+  const toggleAlive = (seat: number) => {
+    if (!state.seats) return
+    const isDead = state.deadSeats.includes(seat)
+    const deadSeats = isDead
+      ? state.deadSeats.filter((d) => d !== seat)
+      : [...state.deadSeats, seat]
+    persist({ ...state, deadSeats })
+  }
+
   // ---- 夜晚 ----
   const openStep = (stepKey: string) => {
     setActiveStep(stepKey)
@@ -258,6 +268,22 @@ function Offline() {
   }
 
   const openVote = () => persist({ ...state, dayStage: 'vote' })
+
+  // 跳过投票（平票/流局/无人出局）
+  const skipVote = () =>
+    persist({
+      ...state,
+      dayStage: 'summary',
+      dayLog: [...state.dayLog, `第${state.nightIndex}天：平票/流局，本轮无人被放逐`],
+    })
+
+  // 放弃开枪（不开枪直接进入总结）
+  const skipGun = () =>
+    persist({
+      ...state,
+      dayStage: 'summary',
+      dayLog: [...state.dayLog, `${state.gunSource}号放弃开枪`],
+    })
 
   const exile = (seat: number) => {
     if (!state.seats) return
@@ -450,32 +476,34 @@ function Offline() {
                 </span>
               </div>
               <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
-                {state.seats.map((s) => (
+                {state.seats.map((s) => {
+                  const isDead = state.deadSeats.includes(s.seat)
+                  return (
                   <div
                     key={s.seat}
                     className={`rounded-xl border px-3 py-2 ${
-                      state.deadSeats.includes(s.seat) ? 'border-slate-800 opacity-40' : ''
+                      isDead ? 'border-slate-800 opacity-40' : ''
                     } ${CAMP_COLORS[s.camp]}`}
                   >
                     <div className="flex items-center justify-between">
                       <span className="font-bold">{s.seat}号</span>
-                      {state.deadSeats.includes(s.seat) && (
-                        <span className="text-xs text-rose-400">出局</span>
-                      )}
+                      {isDead && <span className="text-xs text-rose-400">已出局</span>}
                     </div>
-                    <select
-                      value={s.key}
-                      onChange={(e) => changeSeatRole(s.seat, e.target.value)}
-                      className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-800 px-1.5 py-1 text-xs text-slate-200"
+                    <p className="mt-1 text-xs font-bold text-slate-100">{s.name}</p>
+                    <p className="text-[11px] opacity-80">{CAMP_LABEL[s.camp]}阵营</p>
+                    <button
+                      type="button"
+                      onClick={() => toggleAlive(s.seat)}
+                      className={`mt-1.5 w-full rounded-lg py-1 text-[11px] font-bold transition active:scale-95 ${
+                        isDead
+                          ? 'bg-emerald-600 text-slate-950'
+                          : 'bg-slate-700 text-slate-200'
+                      }`}
                     >
-                      {board.roles.map((r) => (
-                        <option key={r.key} value={r.key}>
-                          {r.name}
-                        </option>
-                      ))}
-                    </select>
+                      {isDead ? '复活' : '淘汰'}
+                    </button>
                   </div>
-                ))}
+                )})}
               </div>
               <button
                 type="button"
@@ -528,6 +556,9 @@ function Offline() {
                 {NIGHT_STEPS.filter((s) => s.key === activeStep).map((step) => (
                   <div key={step.key}>
                     <p className="text-sm font-bold text-amber-400">{step.name}</p>
+                    <p className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-200">
+                      👉 法官话术：请全体闭眼后，单独请【{step.name}】睁眼，按下面的说明让他操作。做完点「记录」，没轮到/无人可操作就点「跳过这一步」。
+                    </p>
                     <p className="mt-2 text-xs leading-relaxed text-slate-400">
                       {step.prompt}
                     </p>
@@ -597,7 +628,7 @@ function Offline() {
                           <>
                             <p className="mt-3 text-xs text-slate-400">选择毒药目标</p>
                             <div className="mt-2 grid grid-cols-4 gap-2">
-                              {(state.seats ?? []).map((s) => (
+                              {(state.seats ?? []).filter((s) => s.seat !== witchSeat).map((s) => (
                                 <button
                                   key={s.seat}
                                   type="button"
@@ -633,22 +664,35 @@ function Offline() {
                       <div className="mt-4">
                         {step.needTarget && (
                           <>
+                            {step.key === 'seer' && target !== null && (
+                              <p className="mb-2 text-sm font-bold text-amber-300">
+                                查验 {target}号：{(state.seats ?? []).find((s) => s.seat === target)?.camp === 'wolf' ? '狼人' : '金水（好人）'}
+                              </p>
+                            )}
                             <p className="text-xs text-slate-400">选择目标玩家</p>
                             <div className="mt-2 grid grid-cols-4 gap-2">
-                              {(state.seats ?? []).map((s) => (
+                              {(state.seats ?? []).map((s) => {
+                                const dwSeat = (state.seats ?? []).find((x) => x.key === 'dream_weaver')?.seat
+                                const dwSelf = step.key === 'dream_weaver' && s.seat === dwSeat
+                                return (
                                 <button
                                   key={s.seat}
                                   type="button"
+                                  disabled={dwSelf}
+                                  title={dwSelf ? '摄梦人不能对自己使用技能' : undefined}
                                   onClick={() => setTarget(target === s.seat ? null : s.seat)}
-                                  className={`rounded-xl py-2.5 text-sm font-bold transition active:scale-95 ${
-                                    target === s.seat
-                                      ? 'bg-amber-500 text-slate-950'
-                                      : 'border border-slate-700 text-slate-300'
+                                  className={`rounded-xl py-2.5 text-sm font-bold transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-30 ${
+                                    dwSelf
+                                      ? 'border border-slate-800 bg-slate-900 text-slate-600'
+                                      : target === s.seat
+                                        ? 'bg-amber-500 text-slate-950'
+                                        : 'border border-slate-700 text-slate-300'
                                   }`}
                                 >
                                   {s.seat}号
                                 </button>
-                              ))}
+                              )})}
+                            </div>
                             </div>
                           </>
                         )}
@@ -669,15 +713,13 @@ function Offline() {
                           >
                             记录{step.name}操作
                           </button>
-                          {step.canSkip && (
-                            <button
-                              type="button"
-                              onClick={() => recordAction(step.key, `${step.name}不使用技能（空过）`, null)}
-                              className="w-full rounded-xl border border-slate-600 py-3 text-sm font-bold text-slate-300 transition active:scale-95"
-                            >
-                              不使用技能（空过）
-                            </button>
-                          )}
+                          <button
+                            type="button"
+                            onClick={() => recordAction(step.key, `${step.name}跳过（无人行动/不使用技能）`, null)}
+                            className="w-full rounded-xl border border-slate-600 py-3 text-sm font-bold text-slate-300 transition active:scale-95"
+                          >
+                            跳过这一步（无人行动/空过）
+                          </button>
                         </div>
                       </div>
                     )}
@@ -712,16 +754,18 @@ function Offline() {
                   <>
                     <p className="mt-3 text-xs text-slate-400">点选被投票放逐的玩家（平票/流局由法官决定）</p>
                     <div className="mt-2 grid grid-cols-4 gap-2">
-                      {state.seats.map((s) => (
+                      {state.seats.map((s) => {
+                        const mutedByRaven = state.nightLog.find((a) => a.stepKey === 'raven')?.target === s.seat
+                        return (
                         <button
                           key={s.seat}
                           type="button"
                           onClick={() => exile(s.seat)}
                           className="rounded-xl border border-emerald-500/40 py-2.5 text-sm font-bold text-emerald-300 transition active:scale-95"
                         >
-                          {s.seat}号
+                          {s.seat}号{mutedByRaven ? ' 🚫' : ''}
                         </button>
-                      ))}
+                      )})}
                     </div>
                   </>
                 )}

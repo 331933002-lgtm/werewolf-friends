@@ -696,17 +696,25 @@ function Room() {
     }
   }, [roomId, playerId, nickname, reconnectTick])
 
-  const nightSteps: NightStepConfig[] = currentBoard.nightOrder.map(
-    (key) =>
-      NIGHT_STEPS.find((step) => step.key === key) ?? {
-        key,
-        name: key,
-        prompt: `请 ${key} 睁眼`,
-        needTarget: false,
-        targetCount: 0,
-        canSkip: false,
-      },
-  )
+  // 线下法官助手：只保留场上实际分配到的角色步骤（lovers 为流程步骤，有丘比特才保留）
+  const presentRoleKeys = new Set(game.deal.map((r) => r.key))
+  const nightSteps: NightStepConfig[] = currentBoard.nightOrder
+    .filter((key) =>
+      key === 'lovers'
+        ? presentRoleKeys.has('cupid')
+        : presentRoleKeys.has(key),
+    )
+    .map(
+      (key) =>
+        NIGHT_STEPS.find((step) => step.key === key) ?? {
+          key,
+          name: key,
+          prompt: `请 ${key} 睁眼`,
+          needTarget: false,
+          targetCount: 0,
+          canSkip: false,
+        },
+    )
   const currentStep = nightSteps[game.nightIndex]
   const isLastStep = game.nightIndex >= nightSteps.length - 1
   const seats = Array.from({ length: seatCount }, (_, index) => index + 1)
@@ -731,6 +739,16 @@ function Room() {
     setVoteSeat(null)
     setGunArming(false)
     setRevealSeat(null)
+  }
+
+  /** 线下法官助手：点座位卡片切换淘汰/复活（只改存活，不改身份） */
+  const toggleGraveyard = (seat: number) => {
+    pushHistory()
+    setGame((prev) => {
+      const gy = prev.graveyard ?? []
+      const next = gy.includes(seat) ? gy.filter((s) => s !== seat) : [...gy, seat]
+      return { ...prev, graveyard: [...new Set(next)].sort((a, b) => a - b) }
+    })
   }
 
   const startGame = () => {
@@ -786,7 +804,8 @@ function Room() {
   const handleSeatSelect = (seat: number) => {
     if (!currentStep) return
     if (currentStep.key === 'witch') {
-      if (witchChoice === 'heal' || witchChoice === 'poison') {
+      // 解药直接救，不选号；只有毒药才选
+      if (witchChoice === 'poison') {
         setNightTargets([seat])
       }
       return
@@ -807,6 +826,8 @@ function Room() {
   const buildAction = (): NightAction => {
     const step = currentStep
     if (step.key === 'witch') {
+      // BUG1 修复：解药直接救今晚狼刀目标，不需要法官选号
+      const wolfTarget = game.nightLog.find((a) => a.stepKey === 'werewolf')?.target ?? null
       const target = nightTargets[0] ?? null
       if (witchChoice === 'none') {
         return {
@@ -822,8 +843,8 @@ function Room() {
         return {
           stepKey: step.key,
           stepName: step.name,
-          note: `女巫用解药救了 ${target}号玩家`,
-          target,
+          note: `女巫用解药救了 ${wolfTarget}号玩家`,
+          target: wolfTarget,
           kills: false,
           saves: true,
         }
@@ -845,6 +866,7 @@ function Room() {
           stepName: step.name,
           note: `${step.name}选择了 ${targets[0]}号 和 ${targets[1]}号 玩家成为情侣`,
           target: null,
+          targets: [targets[0], targets[1]],
           kills: false,
           saves: false,
         }
@@ -884,12 +906,30 @@ function Room() {
       const nextLog = [...prev.nightLog, action]
       if (isLastStep) {
         // 夜晚流程全部走完 -> 天亮了，记录死讯并进入白天
+        const loversAction = nextLog.find((a) => a.stepKey === 'cupid')
+        const lovers = loversAction?.targets ?? prev.lovers ?? []
+        const dreamAction = nextLog.find((a) => a.stepKey === 'dream_weaver')
+        const prevDreamTarget = dreamAction?.target ?? null
+        const witchAction = nextLog.find((a) => a.stepKey === 'witch')
+        const witchAntidoteUsed = prev.witchAntidoteUsed || (witchAction?.saves ?? false)
+        const witchPoisonUsed = prev.witchPoisonUsed || (witchAction?.kills ?? false)
+        const deathList = computeDeaths(nextLog, { deal: prev.deal, graveyard: prev.graveyard ?? [], lovers, prevDreamTarget })
+        // BUG3：夜间死亡的猎人/狼王，天亮宣布死讯后可开枪（不翻牌）
+        const nightGunShooter = deathList.find((seat) => {
+          const r = prev.deal.find((item) => item.seat === seat)
+          return r && (r.key === 'hunter' || r.key === 'wolf_king')
+        }) ?? null
         return {
           ...prev,
           nightLog: nextLog,
           phase: 'day',
-          deaths: computeDeaths(nextLog),
-          dayStage: 'deaths',
+          deaths: deathList,
+          lovers,
+          prevDreamTarget,
+          witchAntidoteUsed,
+          witchPoisonUsed,
+          nightGunShooter,
+          dayStage: nightGunShooter !== null ? 'nightGun' : 'deaths',
           exiledSeat: null,
           exileHasLastWords: null,
           graveyard: [
@@ -942,7 +982,7 @@ function Room() {
     if (!currentStep) return false
     if (currentStep.key === 'witch') {
       if (witchChoice === null) return false
-      if (witchChoice === 'none') return true
+      if (witchChoice === 'none' || witchChoice === 'heal') return true
       return nightTargets.length >= 1
     }
     if (!currentStep.needTarget) return true
@@ -992,8 +1032,7 @@ function Room() {
       const canGun =
         role !== undefined &&
         (role.key === 'hunter' ||
-          role.key === 'wolf_king' ||
-          role.key === 'demon_hunter')
+          role.key === 'wolf_king')
       return {
         ...prev,
         exileHasLastWords: has,
@@ -1023,6 +1062,35 @@ function Room() {
     setGunArming(false)
   }
 
+  // BUG3：夜间死亡的猎人/狼王开枪（不翻牌），开完进遗言
+  const nightGunRole = game.nightGunShooter !== null
+    ? game.deal.find((r) => r.seat === game.nightGunShooter)
+    : undefined
+  const handleNightGunShoot = (target: number) => {
+    pushHistory()
+    if (game.nightGunShooter === null) return
+    setGame((prev) => ({
+      ...prev,
+      dayStage: 'lastWords',
+      graveyard: [...new Set([...(prev.graveyard ?? []), target])],
+      dayLog: [...prev.dayLog, `${prev.nightGunShooter}号夜间死亡（${nightGunRole?.name ?? '猎人'}）开枪带走了 ${target}号玩家`],
+    }))
+    setGunArming(false)
+  }
+  const handleNightGunNoShoot = () => {
+    pushHistory()
+    if (game.nightGunShooter === null) return
+    setGame((prev) => ({
+      ...prev,
+      dayStage: 'lastWords',
+      dayLog: [...prev.dayLog, `${prev.nightGunShooter}号夜间死亡，没有开枪`],
+    }))
+    setGunArming(false)
+  }
+  const skipLastWords = () => {
+    pushHistory()
+    setGame((prev) => ({ ...prev, dayStage: 'deaths', nightGunShooter: null }))
+  }
   const handleGunNoShoot = () => {
     pushHistory()
     if (game.exiledSeat === null) return
@@ -1163,21 +1231,21 @@ function Room() {
     }
     socket.send(JSON.stringify(msg))
   }
-  const submitWitchAction = () => {
-    if (!socket || onlineWitchChoice === null) return
-    if (onlineWitchChoice === 'poison' && witchPoisonTarget === null) return
+  const submitWitchAction = (choiceOverride?: 'save' | 'poison' | 'none') => {
+    if (!socket) return
+    const choice = choiceOverride ?? onlineWitchChoice
+    if (choice === null) return
+    if (choice === 'poison' && witchPoisonTarget === null) return
     const msg: ClientMessage = {
       type: 'witchAction',
       playerId,
-      choice: onlineWitchChoice,
-      target: onlineWitchChoice === 'poison' ? witchPoisonTarget ?? undefined : undefined,
+      choice,
+      target: choice === 'poison' ? witchPoisonTarget ?? undefined : undefined,
     }
     socket.send(JSON.stringify(msg))
     setOnlineWitchChoice(null)
     setWitchPoisonTarget(null)
   }
-
-  /** 提交白天投票（服务端计票）；target 为 null 时弃票 */
   const submitDayVote = () => {
     if (!socket || dayVoteTarget === null) return
     const msg: ClientMessage = { type: 'dayVote', playerId, target: dayVoteTarget }
@@ -1638,8 +1706,13 @@ function Room() {
                       ✕
                     </button>
                   </div>
-                  <div className="mt-3 grid max-h-[52dvh] grid-cols-2 gap-2 overflow-y-auto">
-                    {currentBoard.roles.map((role) => (
+                  <div className="mt-3 grid max-h-[52dvh] grid-cols-3 gap-2 overflow-y-auto">
+                    {[...currentBoard.roles]
+                      .sort((a, b) => {
+                        const rank = (k) => (k === 'cursed_fox' ? 2 : k === 'demon_hunter' ? 1 : 0)
+                        return rank(a.key) - rank(b.key)
+                      })
+                      .map((role) => (
                       <button
                         key={role.key}
                         type="button"
@@ -1647,7 +1720,7 @@ function Room() {
                           setJudgeAssign((prev) => ({ ...prev, [judgePickSeat]: role.key }))
                           setJudgePickSeat(null)
                         }}
-                        className={`rounded-xl border px-2 py-2.5 text-sm font-bold transition active:scale-95 ${
+                        className={`rounded-xl border px-1 py-2 text-xs font-bold transition active:scale-95 ${
                           judgeAssign[judgePickSeat] === role.key
                             ? 'border-amber-500 bg-amber-500/20 text-amber-200'
                             : 'border-slate-700 bg-slate-950 text-slate-200'
@@ -1826,7 +1899,12 @@ function Room() {
                       className="w-40 rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-200"
                     >
                       <option value="">随机</option>
-                      {currentBoard.roles.map((role) => (
+                      {[...currentBoard.roles]
+                      .sort((a, b) => {
+                        const rank = (k) => (k === 'cursed_fox' ? 2 : k === 'demon_hunter' ? 1 : 0)
+                        return rank(a.key) - rank(b.key)
+                      })
+                      .map((role) => (
                         <option key={role.key} value={role.key}>
                           {role.name}
                         </option>
@@ -2148,7 +2226,7 @@ function Room() {
                       <div className="mt-4 flex flex-col gap-2">
                         <button
                           type="button"
-                          onClick={() => setOnlineWitchChoice('save')}
+                          onClick={() => submitWitchAction('save')}
                           disabled={saveDisabled || phaseDisabled}
                           className={`w-full rounded-2xl py-2 text-sm font-bold transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 ${
                             onlineWitchChoice === 'save'
@@ -2175,7 +2253,7 @@ function Room() {
                         </button>
                         <button
                           type="button"
-                          onClick={() => setOnlineWitchChoice('none')}
+                          onClick={() => submitWitchAction('none')}
                           className={`w-full rounded-2xl py-2 text-sm font-bold transition active:scale-95 ${
                             onlineWitchChoice === 'none'
                               ? 'bg-slate-500 text-slate-950'
@@ -2234,20 +2312,26 @@ function Room() {
                     请选择一名玩家成为梦游者（必须选择）
                   </p>
                   <div className="mt-2 grid grid-cols-6 gap-1.5">
-                    {aliveSeatInfo.map((s) => (
+                    {aliveSeatInfo.map((s) => {
+                      const isSelf = s.seat === myRole?.seat
+                      return (
                       <button
                         key={s.seat}
                         type="button"
+                        disabled={isSelf}
+                        title={isSelf ? '不能对自己使用技能' : undefined}
                         onClick={() => setDreamTarget(dreamTarget === s.seat ? null : s.seat)}
-                        className={`rounded-lg py-1.5 text-xs font-bold transition active:scale-95 ${
-                          dreamTarget === s.seat
-                            ? 'bg-cyan-500 text-slate-950'
-                            : 'border border-slate-700 bg-slate-950 text-slate-300'
+                        className={`rounded-lg py-1.5 text-xs font-bold transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-30 ${
+                          isSelf
+                            ? 'border border-slate-800 bg-slate-900 text-slate-600'
+                            : dreamTarget === s.seat
+                              ? 'bg-cyan-500 text-slate-950'
+                              : 'border border-slate-700 bg-slate-950 text-slate-300'
                         }`}
                       >
                         {s.seat}号
                       </button>
-                    ))}
+                    )})}
                   </div>
                   <button
                     type="button"
@@ -3180,22 +3264,71 @@ function Room() {
                 {seats.map((seat) => {
                   const dead = judgeGraveyard.includes(seat)
                   const role = game.deal.find((d) => d.seat === seat)
+                  // 阵营动态：咒狐未连=独立；情侣/丘比特随链显示（双好/双狼/人狼/含第三方）
+                  let campLabel: string
+                  const cupidAction = game.nightLog.find((a) => a.stepKey === 'cupid')
+                  const lovers = cupidAction?.targets ?? []
+                  const isLover = lovers.includes(seat)
+                  const isCupid = role?.key === 'cupid'
+                  if (role?.key === 'lonely_girl') {
+                    // 觉醒孤独少女：阵营实时自动变化（只显示阵营名）
+                    const idolSeat = game.nightLog.find((a) => a.stepKey === 'lonely_girl')?.targets?.[0]
+                    const idolRole = game.deal.find((r) => r.seat === idolSeat)
+                    const idolDead = idolSeat != null && judgeGraveyard.includes(idolSeat)
+                    if (!idolSeat || !idolRole || !idolDead) {
+                      campLabel = '好人'
+                    } else {
+                      campLabel = idolRole.camp === 'wolf' ? '狼人' : idolRole.camp === 'good' ? '好人' : '第三方'
+                    }
+                  } else if (role?.key === 'cursed_fox') {
+                    campLabel = lovers.includes(seat) ? '第三方（情侣）' : '独立'
+                  } else if (isLover || isCupid) {
+                    const [la, lb] = lovers
+                    const lr1 = game.deal.find((r) => r.seat === la)
+                    const lr2 = game.deal.find((r) => r.seat === lb)
+                    const pairHasThird = lr1?.key === 'cursed_fox' || lr2?.key === 'cursed_fox' ||
+                      lr1?.key === 'lonely_girl' || lr2?.key === 'lonely_girl'
+                    if (pairHasThird) campLabel = '第三方（情侣）'
+                    else if (lr1?.camp === 'good' && lr2?.camp === 'good') campLabel = '好人（情侣）'
+                    else if (lr1?.camp === 'wolf' && lr2?.camp === 'wolf') campLabel = '狼人（情侣）'
+                    else campLabel = '第三方（情侣）'
+                  } else {
+                    campLabel = role?.camp === 'wolf' ? '狼人' : role?.camp === 'good' ? '好人' : '第三方'
+                  }
+                  // 阵营颜色跟随实时 campLabel（孤独少女变狼等动态变化也变色）
+                  const campColor = dead
+                    ? 'text-slate-600'
+                    : campLabel.includes('狼')
+                      ? 'text-rose-300'
+                      : campLabel.includes('第三方')
+                        ? 'text-violet-300'
+                        : 'text-emerald-300'
+                  // 孤独少女的偶像：卡片上显示 ⭐
+                  const idolSeat = game.nightLog.find((a) => a.stepKey === 'lonely_girl')?.targets?.[0]
+                  const isIdol = seat === idolSeat
                   return (
                     <button
                       key={seat}
                       type="button"
-                      onClick={() => setRevealSeat(seat)}
-                      className={`flex flex-col items-center rounded-lg border px-1 py-2 transition active:scale-95 ${
+                      onClick={() => toggleGraveyard(seat)}
+                      title="点击切换淘汰/复活"
+                      className={`relative flex flex-col items-center rounded-lg border px-1 py-2.5 transition active:scale-95 ${
                         dead
-                          ? 'border-slate-800 bg-slate-900/40'
+                          ? 'border-slate-800 bg-slate-900/40 opacity-50'
                           : 'border-slate-700 bg-slate-900'
                       }`}
                     >
-                      <span className={`text-2xl font-black leading-none ${dead ? 'text-slate-600 line-through' : 'text-slate-100'}`}>
-                        {seat}号
+                      <span className={`text-xl font-black leading-none ${dead ? 'text-slate-600 line-through' : 'text-slate-100'}`}>
+                        {seat}号{isIdol ? ' ⭐' : ''}
                       </span>
-                      <span className={`mt-1 text-base leading-tight ${dead ? 'text-slate-600 line-through' : role?.camp === 'wolf' ? 'text-rose-300' : role?.camp === 'good' ? 'text-emerald-300' : 'text-violet-300'}`}>
+                      <span className={`mt-0.5 text-xs leading-tight ${dead ? 'text-slate-600 line-through' : campColor}`}>
                         {role?.name ?? '?'}
+                      </span>
+                      <span className={`text-[9px] leading-tight ${dead ? 'text-slate-600' : campColor}`}>
+                        {campLabel}阵营
+                      </span>
+                      <span className={`absolute top-1 right-1 inline-block rounded px-1 py-0.5 text-[10px] font-bold leading-none ${dead ? 'bg-emerald-900/70 text-emerald-300 border border-emerald-600/50' : 'bg-rose-900/70 text-rose-300 border border-rose-600/50'}`}>
+                        {dead ? '↺ 复活' : '✕ 淘汰'}
                       </span>
                     </button>
                   )
@@ -3244,15 +3377,11 @@ function Room() {
                   )}
 
                   {(currentStep.needTarget ||
-                    (currentStep.key === 'witch' &&
-                      witchChoice !== null &&
-                      witchChoice !== 'none')) && (
+                    (currentStep.key === 'witch' && witchChoice === 'poison')) && (
                     <>
                       <p className="mt-2 text-[11px] text-slate-500">
                         {currentStep.key === 'witch'
-                          ? witchChoice === 'heal'
-                            ? '选择要救的玩家'
-                            : '选择要毒的玩家'
+                          ? '选择要毒的玩家'
                           : currentStep.targetCount === 2
                             ? '依次选 2 名玩家（再点取消）'
                             : '点击选择目标（再点取消）'}
@@ -3262,15 +3391,26 @@ function Room() {
                           .filter((seat) => !judgeGraveyard.includes(seat))
                           .map((seat) => {
                             const selected = nightTargets.includes(seat)
+                            // 摄梦人不能对自己使用技能：摄梦人座位置灰
+                            const dreamSeat = game.deal.find((r) => r.key === 'dream_weaver')?.seat
+                            const isDreamSelf = currentStep.key === 'dream_weaver' && seat === dreamSeat
+                            // 觉醒孤独少女不能选自己为偶像：自己座位置灰
+                            const lonelySeat = game.deal.find((r) => r.key === 'lonely_girl')?.seat
+                            const isLonelySelf = currentStep.key === 'lonely_girl' && seat === lonelySeat
+                            const isSelf = isDreamSelf || isLonelySelf
                             return (
                               <button
                                 key={seat}
                                 type="button"
+                                disabled={isSelf}
+                                title={isDreamSelf ? '摄梦人不能对自己使用技能' : isLonelySelf ? '不能选自己为偶像' : undefined}
                                 onClick={() => handleSeatSelect(seat)}
-                                className={`rounded-lg py-2 text-xs font-bold active:scale-95 ${
-                                  selected
-                                    ? 'bg-amber-500 text-slate-950'
-                                    : 'border border-slate-700 bg-slate-900 text-slate-300'
+                                className={`rounded-lg py-2 text-xs font-bold active:scale-95 disabled:cursor-not-allowed disabled:opacity-30 ${
+                                  isSelf
+                                    ? 'border border-slate-800 bg-slate-900 text-slate-600'
+                                    : selected
+                                      ? 'bg-amber-500 text-slate-950'
+                                      : 'border border-slate-700 bg-slate-900 text-slate-300'
                                 }`}
                               >
                                 {seat}号
@@ -3305,6 +3445,73 @@ function Room() {
 
               {game.phase === 'day' && (
                 <>
+                  {game.dayStage === 'nightGun' && game.nightGunShooter !== null && (
+                    <>
+                      <p className="text-sm font-black text-slate-100">
+                        {game.nightGunShooter}号夜间死亡，是否发动技能开枪？（不翻牌）
+                      </p>
+                      {!gunArming ? (
+                        <div className="mt-2.5 grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setGunArming(true)}
+                            className="rounded-xl bg-rose-500 py-2.5 text-sm font-bold text-slate-950 active:scale-95"
+                          >
+                            开枪
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleNightGunNoShoot}
+                            className="rounded-xl bg-slate-700 py-2.5 text-sm font-bold text-slate-100 active:scale-95"
+                          >
+                            不开枪
+                          </button>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="mt-1.5 grid grid-cols-6 gap-1.5">
+                            {seats
+                              .filter(
+                                (seat) =>
+                                  !judgeGraveyard.includes(seat) && seat !== game.nightGunShooter,
+                              )
+                              .map((seat) => (
+                                <button
+                                  key={seat}
+                                  type="button"
+                                  onClick={() => handleNightGunShoot(seat)}
+                                  className="rounded-lg border border-slate-700 bg-slate-900 py-2 text-xs font-bold text-slate-300 active:scale-95"
+                                >
+                                  {seat}号
+                                </button>
+                              ))}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setGunArming(false)}
+                            className="mt-2 w-full rounded-lg border border-slate-700 py-2 text-xs font-bold text-slate-300 active:scale-95"
+                          >
+                            取消开枪
+                          </button>
+                        </>
+                      )}
+                    </>
+                  )}
+
+                  {game.dayStage === 'lastWords' && (
+                    <>
+                      <p className="text-sm font-black text-amber-300">
+                        死亡玩家发表遗言（法官口头进行）
+                      </p>
+                      <button
+                        type="button"
+                        onClick={skipLastWords}
+                        className="mt-2.5 w-full rounded-xl bg-amber-500 py-2.5 text-sm font-bold text-slate-950 active:scale-95"
+                      >
+                        遗言结束，继续
+                      </button>
+                    </>
+                  )}
                   {game.dayStage === 'deaths' && (
                     <>
                       <p className="text-sm font-black text-slate-100">昨晚死讯</p>
@@ -3329,7 +3536,10 @@ function Room() {
                       <div className="mt-1.5 grid grid-cols-6 gap-1.5">
                         {seats
                           .filter((seat) => !judgeGraveyard.includes(seat))
-                          .map((seat) => (
+                          .map((seat) => {
+                            const ravenTarget = game.nightLog.find((a) => a.stepKey === 'raven')?.target
+                            const muted = ravenTarget === seat
+                            return (
                             <button
                               key={seat}
                               type="button"
@@ -3340,9 +3550,9 @@ function Room() {
                                   : 'border border-slate-700 bg-slate-900 text-slate-300'
                               }`}
                             >
-                              {seat}号
+                              {seat}号{muted ? ' 🚫' : ''}
                             </button>
-                          ))}
+                          )})}
                       </div>
                       <div className="mt-2.5 grid grid-cols-3 gap-1.5">
                         <button
@@ -3461,6 +3671,24 @@ function Room() {
                           </li>
                         ))}
                       </ul>
+                      {(() => {
+                        const gy = game.graveyard ?? []
+                        const aliveWolf = game.deal.filter((r) => r.camp === 'wolf' && !gy.includes(r.seat)).length
+                        const aliveGood = game.deal.filter((r) => r.camp === 'good' && !gy.includes(r.seat)).length
+                        const lovers = game.lovers ?? []
+                        const lr = lovers.map((s) => game.deal.find((r) => r.seat === s))
+                        const isHW = lr.length === 2 && lr[0] && lr[1] &&
+                          ((lr[0].camp === 'good' && lr[1].camp === 'wolf') ||
+                           (lr[0].camp === 'wolf' && lr[1].camp === 'good'))
+                        const hasThird = lr.some((r) => r && (r.key === 'cursed_fox' || r.key === 'lonely_girl'))
+                        let win: string | null = null
+                        if ((isHW || hasThird) && aliveGood === 0 && aliveWolf === 0) win = '第三方阵营胜利'
+                        else if (aliveWolf === 0) win = '好人阵营胜利'
+                        else if (aliveGood === 0) win = '狼人阵营胜利'
+                        return win ? (
+                          <p className="mt-2 rounded-lg bg-amber-500/20 px-3 py-2 text-center text-sm font-black text-amber-300">{win}</p>
+                        ) : null
+                      })()}
                       <button
                         type="button"
                         onClick={enterNight}

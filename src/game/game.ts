@@ -15,6 +15,7 @@ export interface NightAction {
   stepName: string
   note: string
   target: number | null
+  targets?: number[]
   kills: boolean
   saves: boolean
 }
@@ -29,7 +30,7 @@ export interface NightStepConfig {
 }
 
 /** 白天流程阶段：死讯 -> 投票 -> 放逐（遗言） -> 开枪 -> 完成 */
-export type DayStage = 'deaths' | 'vote' | 'exile' | 'gun' | 'summary'
+export type DayStage = 'deaths' | 'nightGun' | 'lastWords' | 'vote' | 'exile' | 'gun' | 'summary'
 
 export interface SavedGame {
   deal: SeatRole[]
@@ -47,6 +48,27 @@ export interface SavedGame {
   exileHasLastWords: boolean | null
   /** 白天操作记录（放逐/遗言/开枪/平票），跨天累计用于复盘 */
   dayLog: string[]
+  /** 夜间死亡的猎人/狼王座位（天亮后触发开枪，不翻牌） */
+  nightGunShooter?: number | null
+  /** 跨晚状态：情侣两人（丘比特连完后固定） */
+  lovers?: number[]
+  /** 上一晚摄梦人目标（用于连续两晚判定） */
+  prevDreamTarget?: number | null
+  /** 女巫解药/毒药是否已用过 */
+  witchAntidoteUsed?: boolean
+  witchPoisonUsed?: boolean
+  /** 孤独少女偶像座位 + 是否已变身 */
+  lonelyIdol?: number | null
+  lonelyConverted?: boolean
+  /** 丘比特是否已连情侣 */
+  cupidConnected?: boolean
+  lovers?: number[]
+  prevDreamTarget?: number | null
+  witchAntidoteUsed?: boolean
+  witchPoisonUsed?: boolean
+  lonelyIdol?: number | null
+  lonelyConverted?: boolean
+  cupidConnected?: boolean
   /** 线下法官助手：累计出局座位（夜间死讯/放逐/开枪），用于操作按钮过滤 */
   graveyard?: number[]
 }
@@ -198,14 +220,39 @@ export function shuffleDeal(board: Board): SeatRole[] {
 }
 
 /** 根据夜晚操作记录计算死讯（被刀/被毒且未被解药救回） */
-export function computeDeaths(actions: NightAction[]): number[] {
+export function computeDeaths(actions: NightAction[], state?: {
+  deal: SeatRole[]
+  graveyard: number[]
+  lovers?: number[]
+  prevDreamTarget?: number | null
+}): number[] {
   const killed = actions
     .filter((action) => action.kills && action.target !== null)
     .map((action) => action.target as number)
   const saved = actions
     .filter((action) => action.saves && action.target !== null)
     .map((action) => action.target as number)
-  return killed.filter((seat) => !saved.includes(seat)).sort((a, b) => a - b)
+  const base = killed.filter((seat) => !saved.includes(seat))
+  const deaths = new Set(base)
+  if (state) {
+    const roleOf = (seat: number) => state.deal.find((r) => r.seat === seat)
+    const seerAction = actions.find((a) => a.stepKey === 'seer')
+    if (seerAction?.target != null && roleOf(seerAction.target)?.key === 'cursed_fox') {
+      deaths.add(seerAction.target)
+    }
+    const dreamAction = actions.find((a) => a.stepKey === 'dream_weaver')
+    if (dreamAction?.target != null && state.prevDreamTarget != null && dreamAction.target === state.prevDreamTarget) {
+      deaths.add(dreamAction.target)
+    }
+    const lovers = state.lovers ?? []
+    for (const seat of [...deaths]) {
+      const other = lovers.find((l) => l !== seat && (lovers[0] === seat || lovers[1] === seat))
+      if (other != null && !deaths.has(other) && !state.graveyard.includes(other)) {
+        deaths.add(other)
+      }
+    }
+  }
+  return [...deaths].filter((s) => !state?.graveyard.includes(s)).sort((a, b) => a - b)
 }
 
 function storageKey(roomId: string) {
