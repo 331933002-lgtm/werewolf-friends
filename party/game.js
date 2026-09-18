@@ -487,7 +487,7 @@ export default class GameServer {
         }
         return occupied.size + 1;
     }
-    /** 分配房间内未使用的头像索引（1..12，保证同房间不重复；池子耗尽后随机兜底） */
+    /** 分配房间内未使用的头像索引（1..13，保证同房间不重复；池子耗尽后随机兜底） */
     nextFreeAvatar(room) {
         const used = new Set();
         for (const info of room.players.values()) {
@@ -495,12 +495,12 @@ export default class GameServer {
                 used.add(info.avatarIdx);
         }
         const free = [];
-        for (let i = 1; i <= 12; i++) {
+        for (let i = 1; i <= 13; i++) {
             if (!used.has(i))
                 free.push(i);
         }
         if (free.length === 0)
-            return 1 + Math.floor(Math.random() * 12);
+            return 1 + Math.floor(Math.random() * 13);
         return free[Math.floor(Math.random() * free.length)];
     }
     handleReady(room, msg) {

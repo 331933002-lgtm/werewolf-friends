@@ -69,6 +69,10 @@ export interface SavedGame {
   lonelyIdol?: number | null
   lonelyConverted?: boolean
   cupidConnected?: boolean
+  /** 上一晚噩梦之影恐惧目标（不能连续两晚恐惧同一人） */
+  prevNightmareTarget?: number | null
+  /** 上一晚蚀时狼妃封锁目标（不能连续两晚封锁同一人） */
+  prevWolfQueenTarget?: number | null
   /** 线下法官助手：累计出局座位（夜间死讯/放逐/开枪），用于操作按钮过滤 */
   graveyard?: number[]
 }
@@ -86,7 +90,7 @@ export const NIGHT_STEPS: NightStepConfig[] = [
     prompt: ROLE_DESCRIPTIONS['lonely_girl'],
     needTarget: true,
     targetCount: 1,
-    canSkip: false,
+    canSkip: true,
   },
   {
     key: 'cupid',
@@ -94,7 +98,7 @@ export const NIGHT_STEPS: NightStepConfig[] = [
     prompt: ROLE_DESCRIPTIONS['cupid'],
     needTarget: true,
     targetCount: 2,
-    canSkip: false,
+    canSkip: true,
   },
   {
     key: 'lovers',
@@ -102,7 +106,7 @@ export const NIGHT_STEPS: NightStepConfig[] = [
     prompt: '请情侣睁眼，不对话，只确认彼此的号码。',
     needTarget: false,
     targetCount: 0,
-    canSkip: false,
+    canSkip: true,
   },
   {
     key: 'nightmare',
@@ -134,7 +138,7 @@ export const NIGHT_STEPS: NightStepConfig[] = [
     prompt: '请狼人阵营睁眼，选择今晚要刀的一名玩家（狼王可自爆/自刀，噩梦之影恐惧效果由法官自行判断）。',
     needTarget: true,
     targetCount: 1,
-    canSkip: false,
+    canSkip: true,
   },
   {
     key: 'witch',
@@ -142,7 +146,7 @@ export const NIGHT_STEPS: NightStepConfig[] = [
     prompt: ROLE_DESCRIPTIONS['witch'],
     needTarget: true,
     targetCount: 1,
-    canSkip: false,
+    canSkip: true,
   },
   {
     key: 'seer',
@@ -150,7 +154,7 @@ export const NIGHT_STEPS: NightStepConfig[] = [
     prompt: ROLE_DESCRIPTIONS['seer'],
     needTarget: true,
     targetCount: 1,
-    canSkip: false,
+    canSkip: true,
   },
   {
     key: 'raven',
@@ -190,7 +194,7 @@ export const NIGHT_STEPS: NightStepConfig[] = [
     prompt: ROLE_DESCRIPTIONS['cursed_fox'],
     needTarget: false,
     targetCount: 0,
-    canSkip: false,
+    canSkip: true,
   },
   {
     key: 'wolf_witch',
@@ -243,6 +247,17 @@ export function computeDeaths(actions: NightAction[], state?: {
     const dreamAction = actions.find((a) => a.stepKey === 'dream_weaver')
     if (dreamAction?.target != null && state.prevDreamTarget != null && dreamAction.target === state.prevDreamTarget) {
       deaths.add(dreamAction.target)
+    }
+    // 猎魔人狩猎：目标是狼人->目标出局；目标是好人->猎魔人出局
+    const demonHunterAction = actions.find((a) => a.stepKey === 'demon_hunter')
+    if (demonHunterAction?.target != null) {
+      const demonHunterSeat = state.deal.find((r) => r.key === 'demon_hunter')?.seat
+      const targetRole = roleOf(demonHunterAction.target)
+      if (targetRole && targetRole.camp === 'wolf') {
+        deaths.add(demonHunterAction.target)
+      } else if (demonHunterSeat != null) {
+        deaths.add(demonHunterSeat)
+      }
     }
     const lovers = state.lovers ?? []
     for (const seat of [...deaths]) {
