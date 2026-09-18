@@ -18,7 +18,7 @@ function createTrtcUserSig(userID) {
     return TRTC_SIG_API.genUserSig(userID, TRTC_USER_SIG_EXPIRE);
 }
 const NIGHT_STEP_MS = Number(process.env.NIGHT_STEP_MS) || 60_000;
-const NIGHT_TOTAL_MS = Number(process.env.NIGHT_TOTAL_MS) || 300_000;
+const NIGHT_TOTAL_MS = Number(process.env.NIGHT_TOTAL_MS) || 60_000;
 /** 白天发言阶段统一时长（结束后自动开始投票） */
 const TALK_MS = Number(process.env.TALK_MS) || 90_000;
 /** 白天投票阶段统一时长（到点强制计票；全部存活玩家投完则提前结算） */
@@ -394,7 +394,7 @@ export default class GameServer {
         const playerId = room.connToPlayer.get(conn.id);
         room.conns.delete(conn.id);
         if (playerId) {
-            room.players.delete(playerId);
+            // 问题4：玩家离开不删除 players 记录，重连时复用 existing（保留座位/准备/身份）
             room.connToPlayer.delete(conn.id);
             if (room.playerConns.get(playerId) === conn.id) {
                 room.playerConns.delete(playerId);
@@ -979,6 +979,10 @@ export default class GameServer {
         // 丘比特未在首夜完成连线时，服务端兜底随机连两名玩家；绝不广播“跳过”。
         this.ensureCupidConnected(room);
         const deaths = new Set();
+        // BUG1：结算上一晚猎魔人狩猎的次日出局
+        if (gs.pendingDemonKill != null && !gs.deadSeats.includes(gs.pendingDemonKill)) {
+            deaths.add(gs.pendingDemonKill);
+        }
         const wolfTarget = gs.wolfTarget;
         const dreamTarget = room.dreamTarget;
         const wolfQueenTarget = gs.wolfQueenTarget;
@@ -1014,6 +1018,13 @@ export default class GameServer {
             if (wkSeat && wkSeat.roleKey === 'cursed_fox')
                 wolfKill = null;
         }
+        // BUG3：噩梦之影恐惧狼人 -> 当晚整个狼队无法袭击（空刀）
+        if (wolfKill !== null && gs.nightmareTarget !== null) {
+            const feared = gs.seats.find((s) => s.seat === gs.nightmareTarget);
+            if (feared && feared.camp === 'wolf' && !gs.deadSeats.includes(feared.seat)) {
+                wolfKill = null;
+            }
+        }
         // ---- 女巫毒（梦游者免疫毒；毒猎魔人无效） ----
         if (poisonKill !== null && poisonKill === dreamTarget)
             poisonKill = null;
@@ -1042,8 +1053,8 @@ export default class GameServer {
             deaths.add(wolfKill);
         if (poisonKill !== null)
             deaths.add(poisonKill);
-        if (demonKill !== null)
-            deaths.add(demonKill);
+        // BUG1：今晚猎魔人狩猎结果存为 pending，次日出局（不当晚死）
+        gs.pendingDemonKill = demonKill;
         // ---- 摄梦人 ----
         // 连续两晚成为梦游者 -> 出局（视为吃女毒药）
         if (dreamTarget !== null && dreamTarget === gs.dreamPrevTarget) {
@@ -1969,7 +1980,10 @@ export default class GameServer {
         }
         // 被放逐者若为猎人/狼王 -> 自动弹出开枪面板（猎魔人白天被放逐不能开枪，已从集合移除）
         const exiled = room.gameState.seats.find((s) => s.seat === exiledSeat);
-        const canGun = exiled !== undefined && ['hunter', 'wolf_king'].includes(exiled.roleKey);
+        // 被放逐的猎人/狼王：若前一晚被噩梦之影恐惧，不能开枪（村规/官方）
+        const canGun = exiled !== undefined &&
+            ['hunter', 'wolf_king'].includes(exiled.roleKey) &&
+            room.gameState.nightmareTarget !== exiledSeat;
         if (canGun && exiled) {
             room.gameState.dayStage = 'gun';
             room.gameState.gunSourceSeat = exiledSeat;
@@ -2178,6 +2192,12 @@ export default class GameServer {
         const pair = gs.cupidTargets;
         let thirdActive = false;
         let pairAllDead = true;
+        let foxLinked = false;
+        let pairKind = null; // 'gg'=双好  'ww'=双狼  'gw'=好+狼  'third'=含第三方/可变阵营
+        const cupidSeat = gs.seats.find((s) => s.roleKey === 'cupid');
+        // 活人统计（按座位原生 camp）
+        let wolfCount = alive.filter((s) => s.camp === 'wolf').length;
+        let goodCount = alive.filter((s) => s.camp === 'good').length;
         if (pair) {
             const [a, b] = pair;
             const aSeat = gs.seats.find((s) => s.seat === a);
@@ -2185,41 +2205,51 @@ export default class GameServer {
             const aAlive = alive.some((s) => s.seat === a);
             const bAlive = alive.some((s) => s.seat === b);
             pairAllDead = !aAlive && !bAlive;
-            if (aSeat && bSeat && aSeat.camp !== bSeat.camp && (aAlive || bAlive)) {
-                thirdActive = true;
+            if (aSeat && bSeat) {
+                const aC = aSeat.camp, bC = bSeat.camp;
+                const pairHasThird = aSeat.roleKey === 'cursed_fox' || bSeat.roleKey === 'cursed_fox' ||
+                    aSeat.roleKey === 'lonely_girl' || bSeat.roleKey === 'lonely_girl';
+                if (pairHasThird) {
+                    pairKind = 'third';
+                    foxLinked = aSeat.roleKey === 'cursed_fox' || bSeat.roleKey === 'cursed_fox';
+                }
+                else if (aC === 'good' && bC === 'good') pairKind = 'gg';
+                else if (aC === 'wolf' && bC === 'wolf') pairKind = 'ww';
+                else pairKind = 'gw';
+                if ((pairKind === 'gw' || pairKind === 'third') && (aAlive || bAlive)) thirdActive = true;
+                // 丘比特随链：双好->好人，双狼->狼人，人狼/第三方->第三方
+                if (cupidSeat && !gs.deadSeats.includes(cupidSeat.seat)) {
+                    if (pairKind === 'gg') goodCount += 1;
+                    else if (pairKind === 'ww') wolfCount += 1;
+                }
             }
         }
-        // 第三方（好+狼情侣）：情侣与丘比特之外的所有玩家出局
+        // 第三方优先：第三方成员=情侣两人+存活丘比特；其余全出局则第三方胜
         if (thirdActive) {
-            const outside = alive.filter((s) => {
-                if (pair && (s.seat === pair[0] || s.seat === pair[1]))
-                    return false;
-                if (s.roleKey === 'cupid')
-                    return false;
-                return true;
-            });
+            const thirdSeats = new Set();
+            if (pair) { thirdSeats.add(pair[0]); thirdSeats.add(pair[1]); }
+            if (cupidSeat && !gs.deadSeats.includes(cupidSeat.seat)) thirdSeats.add(cupidSeat.seat);
+            const outside = alive.filter((s) => !thirdSeats.has(s.seat));
             if (outside.length === 0) {
-                this.gameOver(room, 'third', '第三方情侣阵营');
+                this.gameOver(room, 'third', '第三方阵营');
                 return true;
             }
         }
-        // 好人胜利：狼人全灭（有第三方情侣时还需情侣全出局）
-        if (wolves === 0 && (!thirdActive || pairAllDead)) {
-            if (cursedFoxAlive) {
+        // 好人胜利：狼全灭；咒狐未被连时篡改胜利
+        if (wolfCount === 0 && (!thirdActive || pairAllDead)) {
+            if (cursedFoxAlive && !foxLinked) {
                 this.gameOver(room, 'cursed_fox', '咒狐阵营');
-            }
-            else {
+            } else {
                 this.gameOver(room, 'good', '好人阵营');
             }
             return true;
         }
-        // 狼人胜利：存活狼人 >= 存活非狼总数（好人 + 第三阵营；12人板首夜刀1好人不至于直接终局）
-        // 有第三方情侣时还需情侣全出局
-        if (wolves > 0 && wolves >= alive.length - wolves && (!thirdActive || pairAllDead)) {
-            if (cursedFoxAlive) {
+        // 狼人胜利：存活狼 >= 存活非狼总数；咒狐未被连时篡改胜利
+        const nonWolf = alive.length - wolfCount;
+        if (wolfCount > 0 && wolfCount >= nonWolf && (!thirdActive || pairAllDead)) {
+            if (cursedFoxAlive && !foxLinked) {
                 this.gameOver(room, 'cursed_fox', '咒狐阵营');
-            }
-            else {
+            } else {
                 this.gameOver(room, 'wolf', '狼人阵营');
             }
             return true;
