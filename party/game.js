@@ -2482,6 +2482,11 @@ export default class GameServer {
             return;
         }
         if (msg.roleKey === 'dream_weaver') {
+            // 摄梦人不能对自己使用技能
+            if (target === seat.seat) {
+                sender.send(JSON.stringify({ type: 'error', message: '摄梦人不能对自己使用技能' }));
+                return;
+            }
             room.dreamTarget = target;
         }
         else if (msg.roleKey === 'raven') {
