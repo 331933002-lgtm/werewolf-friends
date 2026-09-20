@@ -1087,7 +1087,8 @@ export default class GameServer {
             gs.foxDreamFirstUsed = true;
         }
         // ---- 殉情：情侣一方出局 -> 另一方跟着出局（链式；丘比特连接的两人整局固定） ----
-        this.applyLoversDeath(room, deaths);
+        // 当晚梦游者受保护，豁免殉情（摄梦人本人出局时梦游客已在上方连带加入死亡名单）
+        this.applyLoversDeath(room, deaths, room.dreamTarget);
         const deathList = [...deaths];
         gs.deaths = deathList;
         // 累加整局出局名单
@@ -2108,7 +2109,7 @@ export default class GameServer {
     }
     // ---- 殉情 / 孤独少女 / 胜负判定 ----
     /** 殉情：情侣一方出局 -> 另一方跟着出局（链式）；丘比特连接的两人整局固定 */
-    applyLoversDeath(room, deaths) {
+    applyLoversDeath(room, deaths, exemptSeat = null) {
         const gs = room.gameState;
         // 断链规则：链子情侣排除咒狐（咒狐永不参与情侣链接/殉情）
         const lovers = (gs.cupidTargets ?? []).filter((seat) => {
@@ -2122,6 +2123,9 @@ export default class GameServer {
             if (seatNo !== a && seatNo !== b)
                 continue;
             const other = seatNo === a ? b : a;
+            // 豁免座位（夜间为当晚梦游者：梦游保护豁免殉情；白天放逐/开枪不传豁免）
+            if (other === exemptSeat)
+                continue;
             if (gs.deadSeats.includes(other) || deaths.has(other))
                 continue;
             if (!gs.seats.some((s) => s.seat === other))
@@ -2158,6 +2162,11 @@ export default class GameServer {
             newRoleKey = idol.roleKey;
             newRoleName = idol.roleName;
             newCamp = idol.camp;
+            // 继承女巫：只继承毒药，不继承解药
+            if (idol.roleKey === 'witch') {
+                newRoleKey = 'witch_poison';
+                newRoleName = '女巫（仅毒药）';
+            }
         }
         girl.roleKey = newRoleKey;
         girl.roleName = newRoleName;
@@ -2180,6 +2189,8 @@ export default class GameServer {
                 ts: Date.now(),
             });
         }
+        // 广播新的玩家列表（含新 role/camp），前端实时更新
+        this.broadcastRoster(room);
     }
     /** 胜负判定（天亮结算后 / 放逐结算后 / 开枪结算后调用）：
      *  达成任意一方胜利 -> 广播 gameOver 并冻结流程，返回 true
@@ -2198,10 +2209,26 @@ export default class GameServer {
             const r = gs.seats.find((s) => s.seat === seat);
             return r != null && r.roleKey !== 'cursed_fox';
         });
-        // 第三方（第3方）：丘比特 + 有效链子情侣
+        // 实时计算链子阵营：双好链/双狼链不算第三方；人狼链/含第三方才算第三方
+        const realCamp = (seat) => {
+            const r = gs.seats.find((s) => s.seat === seat);
+            if (!r) return 'good';
+            if (r.roleKey === 'lonely_girl' && gs.lonelyConverted) return 'wolf';
+            if (r.roleKey === 'lonely_girl') return 'good';
+            return r.camp;
+        };
         const thirdSeats = new Set();
-        gs.seats.forEach((s) => { if (s.roleKey === 'cupid') thirdSeats.add(s.seat); });
-        lovers.forEach((seat) => thirdSeats.add(seat));
+        if (lovers.length === 2) {
+            const c1 = realCamp(lovers[0]);
+            const c2 = realCamp(lovers[1]);
+            const hasThird = c1 === 'third' || c2 === 'third';
+            const isMixed = c1 !== c2;
+            if (hasThird || isMixed) {
+                // 人狼链/含第三方 -> 丘比特+情侣都是第三方
+                gs.seats.forEach((s) => { if (s.roleKey === 'cupid') thirdSeats.add(s.seat); });
+                lovers.forEach((seat) => thirdSeats.add(seat));
+            }
+        }
         const thirdAlive = alive.filter((s) => thirdSeats.has(s.seat));
         // 好人（第1方）与狼人（第2方），均排除第三方成员；未变身孤独少女视为好人
         const goodAlive = alive.filter((s) =>
