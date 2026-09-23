@@ -894,10 +894,6 @@ export default class GameServer {
             }
             // 猎魔人：第一晚也睁眼（不能使用技能，仅可空过），第二晚起才可狩猎
 
-            if (phase.roleKey === 'wolf_queen' && room.gameState.wolfQueenUsed) {
-                next++;
-                continue;
-            }
             if (this.phasePlayers(room, phase.roleKey).length > 0) {
                 room.gameState.nightStepIndex = next;
                 room.gameState.currentPhase = phase.roleKey;
@@ -2148,29 +2144,23 @@ export default class GameServer {
         const idol = gs.seats.find((s) => s.seat === idolSeat);
         if (!idol || !gs.deadSeats.includes(idol.seat))
             return;
-        // 偶像已出局 -> 变身/继承（只发生一次）
+        // 偶像已出局：被投票放逐 -> 变狼人；其他方式 -> 继承偶像技能（真实获得）
         gs.lonelyConverted = true;
-        let newRoleKey;
-        let newRoleName;
-        let newCamp;
         if (gs.deathCauses[idolSeat] === 'exile') {
-            newRoleKey = 'wolf';
-            newRoleName = '狼人';
-            newCamp = 'wolf';
+            girl.roleKey = 'wolf';
+            girl.roleName = '狼人';
+            girl.camp = 'wolf';
         }
         else {
-            newRoleKey = idol.roleKey;
-            newRoleName = idol.roleName;
-            newCamp = idol.camp;
-            // 继承女巫：只继承毒药，不继承解药
+            girl.roleKey = idol.roleKey;
+            girl.roleName = idol.roleName;
+            girl.camp = idol.camp;
+            // 继承女巫：只继承毒药（解药不能继承）
             if (idol.roleKey === 'witch') {
-                newRoleKey = 'witch_poison';
-                newRoleName = '女巫（仅毒药）';
+                girl.roleKey = 'witch_poison';
+                girl.roleName = '女巫（仅毒药）';
             }
         }
-        girl.roleKey = newRoleKey;
-        girl.roleName = newRoleName;
-        girl.camp = newCamp;
         // 【隐私】变身结果只私发少女本人；若变身为狼人，再仅向狼队播报新队友（好人收不到）
         this.sendToPlayer(room, girl.playerId, {
             type: 'lonelyGirlConverted',
@@ -2425,6 +2415,17 @@ export default class GameServer {
         }
         // ---- 蚀时狼妃：封锁（target=0 表示不使用技能；可以不使用） ----
         if (msg.roleKey === 'wolf_queen') {
+            // 技能已失效：仅睁眼，只能空过
+            if (room.gameState.wolfQueenUsed) {
+                if (msg.target !== 0) {
+                    sender.send(JSON.stringify({ type: 'error', message: '蚀时狼妃技能已失效，本轮仅睁眼（只能空过）' }));
+                    return;
+                }
+                room.gameState.wolfQueenTarget = null;
+                this.acceptNightAction(room, msg.playerId);
+                this.advanceNightStep(room);
+                return;
+            }
             // 0 不能被顶部校验解析，须用原始值特判
             if (msg.target === 0) {
                 room.gameState.wolfQueenTarget = null;
@@ -2434,10 +2435,6 @@ export default class GameServer {
             }
             if (target === null)
                 return;
-            if (target === room.gameState.wolfQueenPrevTarget) {
-                sender.send(JSON.stringify({ type: 'error', message: `不能连续两晚封锁同一名玩家（${target}号）` }));
-                return;
-            }
             room.gameState.wolfQueenTarget = target;
             this.acceptNightAction(room, msg.playerId);
             this.advanceNightStep(room);

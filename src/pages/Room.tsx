@@ -60,6 +60,142 @@ const JUDGE_STEP_HINTS: Record<string, string> = {
   wolf_witch: '喊：狼巫睁眼，选 1 名玩家查验具体身份。',
 }
 
+/** 夜晚步骤目标需求兜底（NIGHT_STEPS 未覆盖的通用板子角色 -> 需要选号码的数量） */
+const STEP_TARGET_FALLBACK: Record<string, { needTarget: boolean; targetCount: number }> = {
+  lonely_girl: { needTarget: true, targetCount: 1 },
+  cupid: { needTarget: true, targetCount: 2 },
+  nightmare: { needTarget: true, targetCount: 1 },
+  seer: { needTarget: true, targetCount: 1 },
+  raven: { needTarget: true, targetCount: 1 },
+  demon_hunter: { needTarget: true, targetCount: 1 },
+  wolf_witch: { needTarget: true, targetCount: 1 },
+}
+
+/** 夜晚步骤名兜底（NIGHT_STEPS 未覆盖的通用板子步骤 -> 中文名） */
+const STEP_NAME_FALLBACK: Record<string, string> = {
+  lonely_girl: '觉醒孤独少女',
+  cupid: '丘比特',
+  lovers: '情侣',
+  nightmare: '噩梦之影',
+  seer: '预言家',
+  raven: '乌鸦',
+  hunter: '猎人',
+  demon_hunter: '猎魔人',
+  wolf_king: '狼王',
+  wolf_witch: '狼巫',
+  wolf_queen: '蚀时狼妃',
+  werewolf: '狼人',
+  witch: '女巫',
+  dream_weaver: '摄梦人',
+  awake_seer: '觉醒预言家',
+  mirror_girl: '魔镜少女',
+  demon_hunter_1: '猎魔人1',
+  demon_hunter_2: '猎魔人2',
+  cursed_fox: '咒狐',
+  sun_maid_devour: '蚀日侍女·吞噬',
+  sun_maid_use: '蚀日侍女·使用技能',
+  miracle_merchant: '奇迹商人',
+  lucky_guy_receive: '幸运儿',
+  lucky_guy_use: '幸运儿·使用技能',
+  awake_wolf_beauty: '觉醒狼美人',
+}
+
+/** 蚀日侍女：吞噬角色 -> 获得的技能类型 */
+const SUN_MAID_SKILL_MAP: Record<string, string> = {
+  witch: 'poison',
+  dream_weaver: 'guard',
+  raven: 'curse',
+  nightmare: 'fear',
+  wolf_queen: 'block',
+  seer: 'check',
+  awake_seer: 'check2',
+  mirror_girl: 'identity',
+  demon_hunter: 'hunt',
+}
+/** 蚀日侍女：技能类型 -> 显示名 */
+const SUN_MAID_SKILL_NAMES: Record<string, string> = {
+  poison: '毒药',
+  guard: '守护',
+  curse: '诅咒',
+  fear: '恐惧',
+  block: '封锁',
+  check: '查验',
+  check2: '查验二人',
+  identity: '查验具体身份',
+  hunt: '狩猎',
+}
+
+/** 蚀日侍女本晚吞噬技能：优先状态字段，兜底从 nightLog 吞噬记录反推 */
+const getSunMaidSkill = (g: SavedGame): string | null => {
+  if (g.sunMaidSkill) return g.sunMaidSkill
+  const dev = g.nightLog.find((a) => a.stepKey === 'sun_maid_devour')
+  if (!dev?.target) return null
+  const role = g.deal.find((r) => r.seat === dev.target)
+  return role ? (SUN_MAID_SKILL_MAP[role.key] ?? null) : null
+}
+
+/** 当前步骤所属角色阵营（特殊步骤映射到实际角色；未分配时按角色规则兜底） */
+const getStepCamp = (g: SavedGame, stepKey: string): string => {
+  if (stepKey === 'lucky_guy_use' && g.luckySeat != null) {
+    const lr = g.deal.find((x) => x.seat === g.luckySeat)
+    if (lr) return lr.camp
+  }
+  const special: Record<string, string> = {
+    sun_maid_devour: 'sun_maid',
+    sun_maid_use: 'sun_maid',
+    lucky_guy_receive: 'miracle_merchant',
+    demon_hunter_1: 'demon_hunter',
+    demon_hunter_2: 'demon_hunter',
+    awake_wolf_beauty: 'awake_wolf_beauty',
+    lovers: 'cupid',
+  }
+  const roleKey = special[stepKey] ?? stepKey
+  const r = g.deal.find((x) => x.key === roleKey)
+  if (r) return r.camp
+  if (['sun_maid', 'werewolf', 'wolf_queen', 'wolf_witch', 'wolf_king', 'nightmare', 'awake_wolf_beauty'].includes(stepKey)) return 'wolf'
+  if (['cupid', 'lonely_girl'].includes(stepKey)) return 'third'
+  if (stepKey === 'cursed_fox') return 'fox'
+  return 'good'
+}
+
+/** 号码按钮整体配色：按当前角色阵营统一（狼=红 好=蓝 第三=粉 咒狐=橙），低饱和柔和 */
+const getCampCls = (g: SavedGame, stepKey: string): { sel: string; un: string } => {
+  const camp = getStepCamp(g, stepKey)
+  if (camp === 'wolf') return { sel: 'border border-rose-400/70 bg-rose-500/25 text-rose-100 ring-1 ring-rose-400/50', un: 'border border-rose-500/35 bg-rose-500/5 text-rose-300' }
+  if (camp === 'fox') return { sel: 'border border-orange-400/70 bg-orange-500/25 text-orange-100 ring-1 ring-orange-400/50', un: 'border border-orange-500/35 bg-orange-500/5 text-orange-300' }
+  if (camp === 'third') return { sel: 'border border-pink-400/70 bg-pink-500/25 text-pink-100 ring-1 ring-pink-400/50', un: 'border border-pink-500/35 bg-pink-500/5 text-pink-300' }
+  return { sel: 'border border-sky-400/70 bg-sky-500/25 text-sky-100 ring-1 ring-sky-400/50', un: 'border border-sky-500/35 bg-sky-500/5 text-sky-300' }
+}
+
+/** 狼人环节需要分配的狼队成员：板子所有狼人阵营角色（含觉醒狼美人/蚀日侍女等特殊狼） */
+const getWolfPackReqs = (board: Board): { roleKey: string; count: number }[] =>
+  board.roles.filter((r) => r.camp === 'wolf').map((r) => ({ roleKey: r.key, count: r.count ?? 1 }))
+
+/** 夜晚阶段 -> 需要分配的角色座位要求列表（null=该阶段不是独立角色，无需分配座位）
+ *  狼人环节 = 普通狼人 + 觉醒狼美人 两个角色一并分配与行动（板子没有的角色自动跳过） */
+const getStepRoleReqs = (stepKey: string): { roleKey: string; count: number }[] | null => {
+  switch (stepKey) {
+    case 'lovers':
+    case 'lucky_guy_receive':
+    case 'lucky_guy_use':
+    case 'sun_maid_use':
+      return null
+    case 'sun_maid_devour':
+      return [{ roleKey: 'sun_maid', count: 1 }]
+    case 'demon_hunter_1':
+      return [{ roleKey: 'demon_hunter', count: 1 }]
+    case 'demon_hunter_2':
+      return [{ roleKey: 'demon_hunter', count: 2 }]
+    case 'werewolf':
+      return [
+        { roleKey: 'awake_wolf_beauty', count: 1 },
+        { roleKey: 'werewolf', count: 1 },
+      ]
+    default:
+      return [{ roleKey: stepKey, count: 1 }]
+  }
+}
+
 const EMPTY_GAME: SavedGame = {
   deal: [],
   phase: 'waiting',
@@ -71,6 +207,13 @@ const EMPTY_GAME: SavedGame = {
   exiledSeat: null,
   exileHasLastWords: null,
   dayLog: [],
+  witchAntidoteCount: 1,
+  witchPoisonCount: 1,
+  wolfQueenUsed: false,
+  prevRavenTarget: null,
+  lonelyConverted: false,
+  lonelyIdol: null,
+  lonelyInherited: null,
 }
 
 function Room() {
@@ -270,7 +413,24 @@ function Room() {
   const [loverSeat, setLoverSeat] = useState<number | null>(null)
   /** 丘比特本人收到的连接确认（仅丘比特可见） */
   const [cupidConnected, setCupidConnected] = useState<[number, number] | null>(null)
-  // ---- 白天流程状态 ----
+  // ---- 幸运儿系统状态 ----
+  /** 幸运儿座位号（奇迹商人发放技能后设置） */
+  const [luckySeat, setLuckySeat] = useState<number | null>(null)
+  /** 幸运儿获得的技能类型：查验/毒药/守护 */
+  const [luckySkill, setLuckySkill] = useState<'check' | 'poison' | 'guard' | null>(null)
+  /** 幸运儿技能是否已使用 */
+  const [luckySkillUsed, setLuckySkillUsed] = useState(false)
+  /** 幸运儿使用技能时选择的目标 */
+  const [luckyTarget, setLuckyTarget] = useState<number | null>(null)
+  /** 幸运儿使用阶段的决定：use/skip/null */
+  const [luckyUseChoice, setLuckyUseChoice] = useState<'use' | 'skip' | null>(null)
+  /** 奇迹商人选择幸运儿时的临时状态 */
+  const [miracleStep, setMiracleStep] = useState<'select_target' | 'select_skill' | null>(null)
+  // ---- 狼美人系统状态 ----
+  /** 狼美人魅惑的目标座位号 */
+  const [wolfBeautyTarget, setWolfBeautyTarget] = useState<number | null>(null)
+  /** 狼美人替死是否已使用 */
+  const [wolfBeautyUsed, setWolfBeautyUsed] = useState(false)  // ---- 白天流程状态 ----
   const [dayStage, setDayStage] = useState<
     'talk' | 'vote' | 'result' | 'gun' | 'done' | null
   >(null)
@@ -708,24 +868,38 @@ function Room() {
       if ((key === 'cupid' || key === 'lovers') && game.dayCount > 1) return false
       // 咒狐仅第一晚（知道座位即可）
       if (key === 'cursed_fox' && game.dayCount > 1) return false
+      // 奇迹商人仅第一晚（每局限一次，用完不再睁眼）
+      if (key === 'miracle_merchant' && game.dayCount > 1) return false
+      // 幸运儿接收告知仅第一晚
+      if (key === 'lucky_guy_receive' && game.dayCount > 1) return false
+      // 蚀日侍女·使用技能：第一晚没有吞噬，排除
+      if (key === 'sun_maid_use' && game.dayCount === 1) return false
       return true
     })
     .map((key) => {
       const base = NIGHT_STEPS.find((step) => step.key === key) ?? {
         key,
-        name: key,
-        prompt: `请 ${key} 睁眼（没有此角色可跳过）`,
-        needTarget: false,
-        targetCount: 0,
+        name: STEP_NAME_FALLBACK[key] ?? key,
+        prompt: `请 ${STEP_NAME_FALLBACK[key] ?? key} 睁眼（没有此角色可跳过）`,
+        ...(STEP_TARGET_FALLBACK[key] ?? { needTarget: false, targetCount: 0 }),
         canSkip: true,
       }
-      // 孤独少女：第一晚选崇拜，后续晚上确认即可（不需要选号码）
-      if (key === 'lonely_girl' && game.dayCount > 1) {
-        return { ...base, needTarget: false, prompt: '喊：孤独少女睁眼确认（第一晚已选崇拜，后续无需操作）。' }
+      // 孤独少女：第一晚选崇拜，后续晚上提醒开刀状态（变狼/继承技能/未触发）
+      if (key === 'lonely_girl' && (game.dayCount > 1 || game.lonelyIdol != null)) {
+        const lonelyState = game.lonelyConverted
+          ? '已变狼人（加入狼队）'
+          : game.lonelyInherited
+            ? `已继承偶像技能：${STEP_NAME_FALLBACK[game.lonelyInherited] ?? game.lonelyInherited}`
+            : '偶像仍在，尚未触发'
+        return { ...base, needTarget: false, prompt: `喊：孤独少女睁眼确认（${lonelyState}）。` }
+      }
+      // 蚀日侍女：第一晚仅认清狼同伴，不吞噬（第二晚起才行动）
+      if (key === 'sun_maid_devour' && game.dayCount === 1) {
+        return { ...base, needTarget: false, prompt: '喊：蚀日侍女睁眼，认清狼同伴（第一晚不吞噬，第二晚起才行动）。' }
       }
       // 猎魔人：第一晚睁眼但不能使用技能，第二晚起才可狩猎
-      if (key === 'demon_hunter' && game.dayCount === 1) {
-        return { ...base, needTarget: false, prompt: '喊：猎魔人睁眼确认（第一晚不能使用技能，第二晚起才可狩猎）。' }
+      if ((key === 'demon_hunter' || key === 'demon_hunter_1' || key === 'demon_hunter_2') && game.dayCount === 1) {
+        return { ...base, needTarget: false, prompt: '喊：' + base.name + '睁眼确认（第一晚不能使用技能，第二晚起才可狩猎）。' }
       }
       return base
     })
@@ -805,6 +979,14 @@ function Room() {
     setRevealSeat(null)
     setShowRecap(false)
     setJudgePickSeat(null)
+    setLuckySeat(null)
+    setLuckySkill(null)
+    setLuckySkillUsed(false)
+    setLuckyTarget(null)
+    setLuckyUseChoice(null)
+    setMiracleStep(null)
+    setWolfBeautyTarget(null)
+    setWolfBeautyUsed(false)
   }
 
   const resetGame = () => {
@@ -820,6 +1002,14 @@ function Room() {
     setShowRecap(false)
     setJudgeAssign({})
     setJudgePickSeat(null)
+    setLuckySeat(null)
+    setLuckySkill(null)
+    setLuckySkillUsed(false)
+    setLuckyTarget(null)
+    setLuckyUseChoice(null)
+    setMiracleStep(null)
+    setWolfBeautyTarget(null)
+    setWolfBeautyUsed(false)
   }
 
   // 夜晚面板：点击座位选择目标（再点一次取消）
@@ -894,12 +1084,27 @@ function Room() {
         }
       }
       const target = targets[0] ?? null
-      if (step.key === 'werewolf') {
+      if (step.key === 'sun_maid_use') {
+        const skill = getSunMaidSkill(game)
         return {
           stepKey: step.key,
           stepName: step.name,
-          note: `狼人刀了 ${target}号玩家`,
+          note: `蚀日侍女使用【${SUN_MAID_SKILL_NAMES[skill ?? ''] ?? skill ?? ''}】${target != null ? `作用于 ${target}号` : ''}`,
           target,
+          kills: skill === 'poison' || skill === 'hunt',
+          saves: false,
+        }
+      }
+      if (step.key === 'werewolf') {
+        const wbSeat = game.deal.find((r) => r.key === 'awake_wolf_beauty')?.seat ?? null
+        const wbAlive = wbSeat != null && !judgeGraveyard.includes(wbSeat)
+        const wbTarget = wbAlive ? wolfBeautyTarget : null
+        return {
+          stepKey: step.key,
+          stepName: step.name,
+          note: `狼人刀了 ${target}号玩家${wbTarget != null ? `；觉醒狼美人魅惑 ${wbTarget}号` : ''}`,
+          target,
+          wolfBeautyTarget: wbTarget,
           kills: true,
           saves: false,
         }
@@ -926,6 +1131,37 @@ function Room() {
   const handleAdvance = (action: NightAction) => {
     setGame((prev) => {
       const nextLog = [...prev.nightLog, action]
+      // 蚀日侍女吞噬：记录本晚获得的技能（当晚使用）
+      let sunMaidSkill = prev.sunMaidSkill ?? null
+      if (action.stepKey === 'sun_maid_devour' && action.target != null) {
+        const devouredRole = prev.deal.find((r) => r.seat === action.target)?.key ?? null
+        sunMaidSkill = SUN_MAID_SKILL_MAP[devouredRole] ?? null
+      }
+      // 奇迹商人：记录幸运儿座位和赋予的技能
+      let luckySeat = prev.luckySeat ?? null
+      let luckySkill = prev.luckySkill ?? null
+      if (action.stepKey === 'miracle_merchant' && action.target != null) {
+        const targetRoleForLucky = prev.deal.find((r) => r.seat === action.target)
+        // 幸运儿是狼人：不获得技能（商人次日出局由 computeDeaths 判定）
+        if (targetRoleForLucky?.camp !== 'wolf') {
+          luckySeat = action.target
+          luckySkill = action.skillType ?? null
+        }
+      }
+      let witchPoisonCount = prev.witchPoisonCount ?? 1
+      // 幸运儿：真正使用技能（target有值）后标记消耗；选择不使用则技能保留
+      let luckySkillUsed = prev.luckySkillUsed ?? false
+      if (action.stepKey === 'lucky_guy_use' && action.target != null) {
+        luckySkillUsed = true
+      }
+      // 觉醒狼美人：本晚魅惑目标更新（狼人环节一并选择 / 独立步骤两种入口）
+      let wolfBeautyTarget = prev.wolfBeautyTarget ?? null
+      if (action.stepKey === 'awake_wolf_beauty' && action.target != null) {
+        wolfBeautyTarget = action.target
+      }
+      if (action.stepKey === 'werewolf' && action.wolfBeautyTarget != null) {
+        wolfBeautyTarget = action.wolfBeautyTarget
+      }
       if (isLastStep) {
         // 夜晚流程全部走完 -> 天亮了，记录死讯并进入白天
         const loversAction = nextLog.find((a) => a.stepKey === 'cupid')
@@ -936,11 +1172,39 @@ function Room() {
         const witchAction = nextLog.find((a) => a.stepKey === 'witch')
         const witchAntidoteUsed = prev.witchAntidoteUsed || (witchAction?.saves ?? false)
         const witchPoisonUsed = prev.witchPoisonUsed || (witchAction?.kills ?? false)
+        const witchAntidoteCount = witchAction?.saves ? 0 : (prev.witchAntidoteCount ?? (prev.witchAntidoteUsed ? 0 : 1))
+        const sunUsePoison = nextLog.find((a) => a.stepKey === 'sun_maid_use' && a.kills && a.target != null)
+        const witchPoisonCountAfter = (witchAction?.kills ? witchPoisonCount - 1 : witchPoisonCount) - (sunUsePoison != null && getSunMaidSkill(prev) === 'poison' ? 1 : 0)
         const nightmareAction = nextLog.find((a) => a.stepKey === 'nightmare')
         const prevNightmareTarget = nightmareAction?.target ?? null
+        const ravenAction = nextLog.find((a) => a.stepKey === 'raven')
+        const prevRavenTarget = ravenAction?.target ?? null
+        const lonelyAction = nextLog.find((a) => a.stepKey === 'lonely_girl')
         const wolfQueenAction = nextLog.find((a) => a.stepKey === 'wolf_queen')
         const prevWolfQueenTarget = wolfQueenAction?.target ?? null
-        const deathList = computeDeaths(nextLog, { deal: prev.deal, graveyard: prev.graveyard ?? [], lovers, prevDreamTarget: prevDreamTargetForCheck })
+        const cdState = {
+          deal: prev.deal,
+          graveyard: prev.graveyard ?? [],
+          lovers,
+          prevDreamTarget: prevDreamTargetForCheck,
+          luckySeat,
+          luckySkill,
+          wolfBeautyTarget,
+          wolfBeautyUsed: prev.wolfBeautyUsed ?? false,
+          wolfQueenUsed: prev.wolfQueenUsed ?? false,
+          sunMaidSkill,
+        }
+        const deathList = computeDeaths(nextLog, cdState)
+        // computeDeaths 内部会在"替死触发/狼妃反弹触发"时置位，读回并持久化（否则跨夜丢失，技能失效不生效）
+        const wolfBeautyUsedAfter = cdState.wolfBeautyUsed ?? false
+        const wolfQueenUsedAfter = cdState.wolfQueenUsed ?? false
+        // 觉醒孤独少女：偶像非放逐出局 -> 继承偶像技能（真实获得）；放逐变狼在白天 confirmExile 处理
+        const idolSeatS = prev.lonelyIdol ?? lonelyAction?.target ?? null
+        let lonelyInheritedNow = prev.lonelyInherited ?? null
+        if (idolSeatS != null && deathList.includes(idolSeatS) && !(prev.lonelyConverted ?? false)) {
+          const idolR = prev.deal.find((r) => r.seat === idolSeatS)
+          if (idolR) lonelyInheritedNow = idolR.key
+        }
         // BUG3：夜间死亡的猎人/狼王，天亮宣布死讯后可开枪（不翻牌）
         const nightGunShooter = deathList.find((seat) => {
           const r = prev.deal.find((item) => item.seat === seat)
@@ -956,9 +1220,21 @@ function Room() {
           prevDreamTarget: dreamAction?.target ?? null,
           witchAntidoteUsed,
           witchPoisonUsed,
+          witchAntidoteCount,
+          witchPoisonCount: witchPoisonCountAfter,
           prevNightmareTarget,
+          prevRavenTarget,
           prevWolfQueenTarget,
+          lonelyIdol: lonelyAction?.target ?? prev.lonelyIdol,
+          lonelyInherited: lonelyInheritedNow,
           nightGunShooter,
+          sunMaidSkill,
+          luckySeat,
+          luckySkill,
+          luckySkillUsed,
+          wolfBeautyTarget,
+          wolfBeautyUsed: wolfBeautyUsedAfter,
+          wolfQueenUsed: wolfQueenUsedAfter,
           dayStage: isFirstNight ? 'sheriff' : (nightGunShooter !== null ? 'nightGun' : 'deaths'),
           exiledSeat: null,
           exileHasLastWords: null,
@@ -966,12 +1242,24 @@ function Room() {
           graveyard: isFirstNight ? (prev.graveyard ?? []) : [...new Set([...(prev.graveyard ?? []), ...deathList])],
         }
       }
-      return { ...prev, nightLog: nextLog, nightIndex: prev.nightIndex + 1 }
+      return {
+        ...prev,
+        nightLog: nextLog,
+        nightIndex: prev.nightIndex + 1,
+        luckySeat,
+        luckySkill,
+        luckySkillUsed,
+        wolfBeautyTarget,
+        witchPoisonCount,
+        sunMaidSkill,
+      }
     })
     setNightTargets([])
     setWitchChoice(null)
     setVoteSeat(null)
     setGunArming(false)
+    setLuckyUseChoice(null)
+    setLuckyTarget(null)
   }
 
   const handleNextStep = () => {
@@ -989,6 +1277,165 @@ function Room() {
       })
       return
     }
+    // 蚀日侍女首夜：只睁眼确认，不吞噬
+    if (currentStep.key === 'sun_maid_devour' && game.dayCount === 1) {
+      handleAdvance({
+        stepKey: 'sun_maid_devour',
+        stepName: '蚀日侍女',
+        note: '蚀日侍女首夜只睁眼确认座位，不吞噬',
+        target: null,
+        kills: false,
+        saves: false,
+      })
+      return
+    }
+    // 觉醒狼美人：魅惑已随狼人环节一并选择，本步骤直接确认
+    if (currentStep.key === 'awake_wolf_beauty') {
+      const wbSeat = game.deal.find((r) => r.key === 'awake_wolf_beauty')?.seat ?? null
+      const wbAlive = wbSeat != null && !judgeGraveyard.includes(wbSeat)
+      if (!wbAlive) {
+        handleAdvance({
+          stepKey: 'awake_wolf_beauty',
+          stepName: '觉醒狼美人',
+          note: '觉醒狼美人已出局（保留流程）',
+          target: null,
+          kills: false,
+          saves: false,
+        })
+        return
+      }
+      const merged = game.wolfBeautyTarget != null
+      if (merged) {
+        handleAdvance({
+          stepKey: 'awake_wolf_beauty',
+          stepName: '觉醒狼美人',
+          note: `觉醒狼美人魅惑 ${game.wolfBeautyTarget}号（已在狼人环节一并选择）`,
+          target: game.wolfBeautyTarget,
+          kills: false,
+          saves: false,
+        })
+        return
+      }
+      // 兜底：未走狼人合并（其他板子），走通用选目标
+    }
+    // 狼人：刀人 + 觉醒狼美人魅惑（若存活）一并提交
+    if (currentStep.key === 'werewolf') {
+      if (nightTargets.length < 1) return
+      const wbSeat = game.deal.find((r) => r.key === 'awake_wolf_beauty')?.seat ?? null
+      const wbAlive = wbSeat != null && !judgeGraveyard.includes(wbSeat)
+      const wbTarget = wbAlive ? wolfBeautyTarget : null
+      if (wbAlive && wbTarget == null) return
+      handleAdvance({
+        stepKey: 'werewolf',
+        stepName: '狼人',
+        note: `狼人刀了 ${nightTargets[0]}号玩家${wbTarget != null ? `；觉醒狼美人魅惑 ${wbTarget}号` : ''}`,
+        target: nightTargets[0] ?? null,
+        wolfBeautyTarget: wbTarget,
+        kills: true,
+        saves: false,
+      })
+      return
+    }
+    // 猎魔人出局：保留流程空过
+    if (currentStep.key === 'demon_hunter_1' || currentStep.key === 'demon_hunter_2' || currentStep.key === 'demon_hunter') {
+      const dhSeatsH = game.deal.filter((r) => r.key === 'demon_hunter').map((r) => r.seat).sort((a, b) => a - b)
+      const dhSeatH = currentStep.key === 'demon_hunter_1' ? dhSeatsH[0] : currentStep.key === 'demon_hunter_2' ? dhSeatsH[1] : dhSeatsH[0] ?? null
+      if (dhSeatH != null && (judgeGraveyard.includes(dhSeatH) || safeNightLog.some((a) => a.kills && a.target === dhSeatH))) {
+        handleAdvance({
+          stepKey: currentStep.key,
+          stepName: currentStep.name,
+          note: `猎魔人（${dhSeatH}号）已出局（保留流程）`,
+          target: null,
+          kills: false,
+          saves: false,
+        })
+        return
+      }
+    }
+    // 奇迹商人：两步选择完成，记录幸运儿和技能
+    if (currentStep.key === 'miracle_merchant') {
+      if (luckySeat == null || luckySkill == null) return
+      const skillName = luckySkill === 'check' ? '查验' : luckySkill === 'poison' ? '毒药' : '守护'
+      handleAdvance({
+        stepKey: 'miracle_merchant',
+        stepName: '奇迹商人',
+        note: `奇迹商人赋予 ${luckySeat}号【${skillName}】一次性技能`,
+        target: luckySeat,
+        skillType: luckySkill,
+        kills: false,
+        saves: false,
+      })
+      return
+    }
+    // 蚀日侍女使用吞噬技能：提交目标（未吞噬到技能则空过）
+    if (currentStep.key === 'sun_maid_use') {
+      const skill = getSunMaidSkill(game)
+      if (skill == null) {
+        handleAdvance({
+          stepKey: 'sun_maid_use',
+          stepName: '蚀日侍女',
+          note: '蚀日侍女本晚未吞噬到技能（空过）',
+          target: null,
+          kills: false,
+          saves: false,
+        })
+        return
+      }
+      if (skill === 'poison' && (game.witchPoisonCount ?? 1) <= 0) {
+        handleAdvance({
+          stepKey: 'sun_maid_use',
+          stepName: '蚀日侍女',
+          note: '蚀日侍女获得毒药，但女巫毒药已用完（空过）',
+          target: null,
+          kills: false,
+          saves: false,
+        })
+        return
+      }
+      if (nightTargets.length < (skill === 'check2' ? 2 : 1)) return
+      handleAdvance(buildAction())
+      return
+    }
+    // 幸运儿使用技能阶段
+    if (currentStep.key === 'lucky_guy_use') {
+      const hasLucky = game.luckySeat != null && game.luckySkill != null && !game.luckySkillUsed
+      if (!hasLucky) {
+        handleAdvance({
+          stepKey: 'lucky_guy_use',
+          stepName: '幸运儿',
+          note: '幸运儿无技能/技能已使用',
+          target: null,
+          kills: false,
+          saves: false,
+        })
+        return
+      }
+      if (luckyUseChoice === null) return
+      if (luckyUseChoice === 'skip') {
+        handleAdvance({
+          stepKey: 'lucky_guy_use',
+          stepName: '幸运儿',
+          note: `幸运儿（${game.luckySeat}号）暂不使用技能（技能保留）`,
+          target: null,
+          skillType: game.luckySkill,
+          kills: false,
+          saves: false,
+        })
+        return
+      }
+      if (luckyTarget == null) return
+      const skillName = game.luckySkill === 'check' ? '查验' : game.luckySkill === 'poison' ? '毒药' : '守护'
+      handleAdvance({
+        stepKey: 'lucky_guy_use',
+        stepName: '幸运儿',
+        note: `幸运儿（${game.luckySeat}号）使用【${skillName}】，目标 ${luckyTarget}号`,
+        target: luckyTarget,
+        skillType: game.luckySkill,
+        kills: game.luckySkill === 'poison',
+        saves: false,
+      })
+      return
+    }
     if (currentStep.key === 'witch') {
       if (witchChoice === null) return
       if (witchChoice === 'none' || witchChoice === 'heal') {
@@ -1001,6 +1448,17 @@ function Room() {
       return
     }
     if (currentStep.needTarget && nightTargets.length < currentStep.targetCount) {
+      // 被蚀日侍女吞噬 / 狼妃技能已失效：按空过处理
+      const devourT = game.nightLog.find((a) => a.stepKey === 'sun_maid_devour')?.target ?? null
+      const blockedSeat = (() => {
+        if (currentStep.key === 'demon_hunter_1') return game.deal.filter((r) => r.key === 'demon_hunter').map((r) => r.seat).sort((a, b) => a - b)[0] ?? null
+        if (currentStep.key === 'demon_hunter_2') return game.deal.filter((r) => r.key === 'demon_hunter').map((r) => r.seat).sort((a, b) => a - b)[1] ?? null
+        return game.deal.find((r) => r.key === currentStep.key)?.seat ?? null
+      })()
+      if ((currentStep.key === 'wolf_queen' && game.wolfQueenUsed) || (game.dayCount > 1 && devourT != null && devourT === blockedSeat)) {
+        handleSkipStep()
+        return
+      }
       return
     }
     handleAdvance(buildAction())
@@ -1026,29 +1484,114 @@ function Room() {
   const isSelfKill = witchSeatNow != null && wolfTargetNow === witchSeatNow
   // 噩梦之影恐惧：被恐惧角色/狼队当晚无法行动，直接空过
   const nightmareTargetNow = game.nightLog.find((a) => a.stepKey === 'nightmare')?.target ?? null
-  const fearedStepSeat = game.deal.find((r) => r.key === currentStep?.key)?.seat ?? null
+  // 恐惧座位映射：特殊步骤 -> 实际角色座位
+  let fearedStepSeat = game.deal.find((r) => r.key === currentStep?.key)?.seat ?? null
+  if (currentStep?.key === 'sun_maid_devour' || currentStep?.key === 'sun_maid_use') {
+    fearedStepSeat = game.deal.find((r) => r.key === 'sun_maid')?.seat ?? null
+  } else if (currentStep?.key === 'lucky_guy_use' && game.luckySeat != null) {
+    fearedStepSeat = game.luckySeat
+  } else if (currentStep?.key === 'demon_hunter_1' || currentStep?.key === 'demon_hunter_2') {
+    const dhS = game.deal.filter((r) => r.key === 'demon_hunter').map((r) => r.seat).sort((a, b) => a - b)
+    fearedStepSeat = currentStep.key === 'demon_hunter_1' ? (dhS[0] ?? null) : (dhS[1] ?? null)
+  }
   const wolfFeared = currentStep?.key === 'werewolf' &&
     nightmareTargetNow != null && game.deal.find((r) => r.seat === nightmareTargetNow)?.camp === 'wolf'
   const isFearedStep = currentStep != null && nightmareTargetNow != null &&
     (wolfFeared || fearedStepSeat === nightmareTargetNow)
+  // 觉醒孤独少女继承技能：该角色已出局且孤独少女存活 -> 由孤独少女代替操作（真实生效）
+  const lonelyInheritedNow = game.lonelyInherited ?? null
+  const lonelySeatNow = game.deal.find((r) => r.key === 'lonely_girl')?.seat ?? null
+  const lonelyAliveNow = lonelySeatNow != null && !judgeGraveyard.includes(lonelySeatNow)
+  const inheritedRoleSeatNow = currentStep != null && currentStep.key !== 'lovers' && currentStep.key !== 'lucky_guy_receive' && currentStep.key !== 'lucky_guy_use' && currentStep.key !== 'sun_maid_use' && currentStep.key !== 'sun_maid_devour'
+    ? (game.deal.find((r) => r.key === currentStep.key)?.seat ?? null)
+    : null
+  const isInheritedStep = currentStep != null && lonelyInheritedNow != null &&
+    lonelyInheritedNow === currentStep.key && lonelyAliveNow &&
+    (inheritedRoleSeatNow == null || judgeGraveyard.includes(inheritedRoleSeatNow))
   const canNext = (() => {
     if (!currentStep) return false
 
-    // 边走边分配：当前角色还没分配座位时不能下一步（lovers 不需要分配座位）
-    if (currentStep.key === 'werewolf') {
-      const unassignedWolfRoles = currentBoard.roles.filter(
-        (r) => r.camp === 'wolf' && !game.deal.some((d) => d.key === r.key)
-      )
-      if (unassignedWolfRoles.length > 0) return false
-    } else if (currentStep.key !== 'lovers' && currentStep.key !== 'wolf_king') {
-      const stepSeatNow = game.deal.find((r) => r.key === currentStep.key)?.seat ?? null
-      if (stepSeatNow == null) return false
+    // 孤独少女继承步骤：该角色已出局，由孤独少女代替操作（不再要求原角色分配）
+    if (isInheritedStep) {
+      if (!currentStep.needTarget) return true
+      return nightTargets.length >= currentStep.targetCount
+    }
+
+    // 边走边分配：当前阶段需要的角色座位不足时不能下一步（狼人环节需同时配齐狼队全部成员）
+    const reqs = currentStep.key === 'werewolf' ? getWolfPackReqs(currentBoard) : getStepRoleReqs(currentStep.key)
+    if (reqs !== null) {
+      for (const req of reqs) {
+        if (!currentBoard.roles.some((r) => r.key === req.roleKey)) continue
+        const assignedCount = game.deal.filter((r) => r.key === req.roleKey).length
+        if (assignedCount < req.count) return false
+      }
     }
     if (isFearedStep) return true
+    // 蚀日侍女首夜：无需目标即可下一步
+    if (currentStep.key === 'sun_maid_devour' && game.dayCount === 1) {
+      return true
+    }
+    // 觉醒狼美人：魅惑已随狼人环节选择 -> 直接下一步；否则按通用选目标
+    if (currentStep.key === 'awake_wolf_beauty') {
+      const wbSeat = game.deal.find((r) => r.key === 'awake_wolf_beauty')?.seat ?? null
+      const wbAlive = wbSeat != null && !judgeGraveyard.includes(wbSeat)
+      if (!wbAlive) return true
+      if (game.wolfBeautyUsed) return true // 技能已触发失效：仅睁眼空过
+      if (game.wolfBeautyTarget != null) return true
+      return nightTargets.length >= 1
+    }
+    // 狼人：刀人目标 + 觉醒狼美人魅惑目标（若存活）都选好
+    if (currentStep.key === 'werewolf') {
+      const wbSeat = game.deal.find((r) => r.key === 'awake_wolf_beauty')?.seat ?? null
+      const wbAlive = wbSeat != null && !judgeGraveyard.includes(wbSeat)
+      if (nightTargets.length < 1) return false
+      if (wbAlive && !game.wolfBeautyUsed && wolfBeautyTarget == null) return false
+      return true
+    }
+    // 奇迹商人：技能与幸运儿号码都选定后可下一步
+    if (currentStep.key === 'miracle_merchant') {
+      return luckySkill != null && luckySeat != null
+    }
+    // 女巫
     if (currentStep.key === 'witch') {
       if (witchChoice === null) return false
       if (witchChoice === 'none' || witchChoice === 'heal') return true
       return nightTargets.length >= 1
+    }
+    // 蚀时狼妃技能已失效：仅睁眼，无需选目标
+    if (currentStep.key === 'wolf_queen' && game.wolfQueenUsed) return true
+    // 蚀日侍女吞噬：被吞噬者当晚无法使用技能，直接空过
+    if (game.dayCount > 1) {
+      const devourT = game.nightLog.find((a) => a.stepKey === 'sun_maid_devour')?.target ?? null
+      if (devourT != null) {
+        const dhS = game.deal.filter((r) => r.key === 'demon_hunter').map((r) => r.seat).sort((a, b) => a - b)
+        let seat = game.deal.find((r) => r.key === currentStep.key)?.seat ?? null
+        if (currentStep.key === 'demon_hunter_1') seat = dhS[0] ?? null
+        if (currentStep.key === 'demon_hunter_2') seat = dhS[1] ?? null
+        if (devourT === seat) return true
+      }
+    }
+    // 蚀日侍女使用吞噬技能
+    if (currentStep.key === 'sun_maid_use') {
+      const skill = getSunMaidSkill(game)
+      if (skill == null) return true // 未吞噬到技能 -> 空过
+      if (skill === 'poison' && (game.witchPoisonCount ?? 1) <= 0) return true // 女巫毒药已用完 -> 空过
+      if (skill === 'check2') return nightTargets.length >= 2
+      return nightTargets.length >= 1
+    }
+    // 幸运儿使用技能阶段
+    if (currentStep.key === 'lucky_guy_use') {
+      const hasLucky = game.luckySeat != null && game.luckySkill != null && !game.luckySkillUsed
+      if (!hasLucky) return true // 无技能/已使用，空过
+      if (luckyUseChoice === null) return false
+      if (luckyUseChoice === 'skip') return true
+      return luckyTarget != null
+    }
+    // 猎魔人出局：保留流程空过
+    if (currentStep.key === 'demon_hunter_1' || currentStep.key === 'demon_hunter_2' || currentStep.key === 'demon_hunter') {
+      const dhSeatsC = game.deal.filter((r) => r.key === 'demon_hunter').map((r) => r.seat).sort((a, b) => a - b)
+      const dhSeatC = currentStep.key === 'demon_hunter_1' ? dhSeatsC[0] : currentStep.key === 'demon_hunter_2' ? dhSeatsC[1] : dhSeatsC[0] ?? null
+      if (dhSeatC != null && (judgeGraveyard.includes(dhSeatC) || safeNightLog.some((a) => a.kills && a.target === dhSeatC))) return true
     }
     if (!currentStep.needTarget) return true
     return nightTargets.length >= currentStep.targetCount
@@ -1070,12 +1613,59 @@ function Room() {
   const confirmExile = () => {
     pushHistory()
     if (voteSeat === null) return
-    setGame((prev) => ({
-      ...prev,
-      exiledSeat: voteSeat,
-      dayStage: 'exile',
-      graveyard: [...new Set([...(prev.graveyard ?? []), voteSeat])],
-    }))
+    setGame((prev) => {
+      const votedRole = prev.deal.find((r) => r.seat === voteSeat)
+      const dreamTargetSeat = prev.nightLog.find((a) => a.stepKey === 'dream_weaver')?.target ?? null
+      const lovers = prev.lovers ?? []
+
+      // 第一步：确定真正出局者（觉醒狼美人首次出局 -> 被魅惑者替代）
+      let actualOut = voteSeat
+      let replaced = false
+      let wolfBeautyUsed = prev.wolfBeautyUsed ?? false
+      const logs: string[] = []
+      if (
+        votedRole?.key === 'awake_wolf_beauty' &&
+        prev.wolfBeautyTarget != null &&
+        !wolfBeautyUsed
+      ) {
+        wolfBeautyUsed = true
+        if (prev.wolfBeautyTarget !== dreamTargetSeat) {
+          actualOut = prev.wolfBeautyTarget
+          replaced = true
+          logs.push(`💫 觉醒狼美人首次面临出局，${actualOut}号（被魅惑者）替代其出局，且不能发动技能`)
+        } else {
+          logs.push(`💫 觉醒狼美人的魅惑目标正在梦游，替死被摄梦保护，狼美人自己出局`)
+        }
+      }
+
+      // 第二步：情侣殉情（出局者在链中，另一方殉情；白天殉情生效，不能发动技能）
+      const outs = [actualOut]
+      const loverOther = lovers.find(
+        (l) => l !== actualOut && (lovers[0] === actualOut || lovers[1] === actualOut),
+      )
+      if (loverOther != null) {
+        outs.push(loverOther)
+        logs.push(`💑 ${loverOther}号因情侣殉情出局（不能发动技能）`)
+      }
+
+      const gy = [...new Set([...(prev.graveyard ?? []), ...outs])]
+      // 觉醒孤独少女：仅偶像被投票放逐出局时变狼，其他方式不生效（偶像座位跨夜持久化）
+      const idolTarget = prev.lonelyIdol ?? prev.nightLog.find((a) => a.stepKey === 'lonely_girl')?.target
+      const lonelyConverted = (prev.lonelyConverted ?? false) || (idolTarget != null && actualOut === idolTarget)
+      if (lonelyConverted) logs.push('🌟 觉醒孤独少女的偶像被放逐出局，孤独少女加入狼人阵营')
+      return {
+        ...prev,
+        exiledSeat: actualOut,
+        dayStage: 'exile',
+        graveyard: gy,
+        wolfBeautyUsed,
+        exileReplaced: replaced,
+        lonelyConverted,
+        // 变狼后真实修改孤独少女阵营（胜负判定/后续夜晚生效）
+        deal: lonelyConverted ? prev.deal.map((r) => (r.key === 'lonely_girl' ? { ...r, camp: 'wolf' } : r)) : prev.deal,
+        dayLog: [...prev.dayLog, ...logs],
+      }
+    })
     setVoteSeat(null)
     setGunArming(false)
   }
@@ -1095,6 +1685,7 @@ function Room() {
     setGame((prev) => {
       const role = prev.deal.find((item) => item.seat === prev.exiledSeat)
       const canGun =
+        prev.exileReplaced !== true &&
         role !== undefined &&
         (role.key === 'hunter' ||
           role.key === 'wolf_king')
@@ -1933,7 +2524,7 @@ function Room() {
                         </div>
                         <div className={`mt-0.5 flex flex-wrap items-center gap-1 text-[11px] ${seatNum > currentBoard.playerCount / 2 ? 'justify-end' : ''}`}>
                           {s?.seat === sheriffSeat && (
-                            <span className="font-bold text-amber-300">👑 警长</span>
+                            <span className="font-bold text-amber-300">⭐ 警长</span>
                           )}
                           {mutedSeat === seatNum && onlinePhase === 'day' && (
                             <span className="font-bold text-rose-300">
@@ -2511,44 +3102,62 @@ function Room() {
               currentPhase?.requiredAction === 'wolf_queen_block' && (
                 <div className="mt-2 rounded-2xl border border-rose-400/40 bg-slate-950 p-2.5">
                   <p className="text-sm font-bold text-rose-400">蚀时狼妃</p>
-                  <p className="mt-1 text-sm text-slate-300">
-                    选择一名玩家封锁：当晚对其的查验/毒药/摄梦反弹给施法者；猎魔人不受影响。可不使用技能
-                  </p>
-                  <div className="mt-2 grid grid-cols-6 gap-1.5">
-                    {aliveSeatInfo.map((s) => (
+                  {game.wolfQueenUsed ? (
+                    <>
+                      <p className="mt-1 rounded-lg bg-slate-800 px-2 py-1.5 text-xs font-bold text-slate-400">
+                        ⚠️ 技能已失效（反弹已触发过），本轮仅睁眼，无需行动
+                      </p>
                       <button
-                        key={s.seat}
                         type="button"
-                        onClick={() =>
-                          setWolfQueenTarget(wolfQueenTarget === s.seat ? null : s.seat)
-                        }
-                        className={`rounded-lg py-1.5 text-xs font-bold transition active:scale-95 ${
-                          wolfQueenTarget === s.seat
-                            ? 'bg-rose-400 text-slate-950'
-                            : 'border border-slate-700 bg-slate-950 text-slate-300'
-                        }`}
+                        onClick={() => submitNightTarget('wolf_queen', 0)}
+                        disabled={phaseDisabled}
+                        className="mt-2 w-full rounded-2xl border border-slate-700 bg-slate-800 py-2 text-sm font-bold text-slate-300 transition active:scale-95"
                       >
-                        {s.seat}号
+                        本轮空过（继续）
                       </button>
-                    ))}
-                  </div>
-                  <div className="mt-4 flex flex-col gap-2">
-                    <button
-                      type="button"
-                      onClick={() => submitNightTarget('wolf_queen', wolfQueenTarget)}
-                      disabled={wolfQueenTarget === null || phaseDisabled}
-                      className="w-full rounded-2xl bg-rose-400 py-2 text-sm font-bold text-slate-950 transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      提交封锁
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => submitNightTarget('wolf_queen', 0)}
-                      className="w-full rounded-2xl border border-slate-700 bg-slate-800 py-2 text-sm font-bold text-slate-300 transition active:scale-95"
-                    >
-                      不使用技能
-                    </button>
-                  </div>
+                    </>
+                  ) : (
+                    <>
+                      <p className="mt-1 text-sm text-slate-300">
+                        选择一名玩家封锁：当晚对其的查验/毒药/摄梦反弹给施法者；猎魔人不受影响。可不使用技能
+                      </p>
+                      <div className="mt-2 grid grid-cols-6 gap-1.5">
+                        {aliveSeatInfo.map((s) => (
+                          <button
+                            key={s.seat}
+                            type="button"
+                            onClick={() =>
+                              setWolfQueenTarget(wolfQueenTarget === s.seat ? null : s.seat)
+                            }
+                            className={`rounded-lg py-1.5 text-xs font-bold transition active:scale-95 ${
+                              wolfQueenTarget === s.seat
+                                ? 'bg-rose-400 text-slate-950'
+                                : 'border border-slate-700 bg-slate-950 text-slate-300'
+                            }`}
+                          >
+                            {s.seat}号
+                          </button>
+                        ))}
+                      </div>
+                      <div className="mt-4 flex flex-col gap-2">
+                        <button
+                          type="button"
+                          onClick={() => submitNightTarget('wolf_queen', wolfQueenTarget)}
+                          disabled={wolfQueenTarget === null || phaseDisabled}
+                          className="w-full rounded-2xl bg-rose-400 py-2 text-sm font-bold text-slate-950 transition active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          提交封锁
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => submitNightTarget('wolf_queen', 0)}
+                          className="w-full rounded-2xl border border-slate-700 bg-slate-800 py-2 text-sm font-bold text-slate-300 transition active:scale-95"
+                        >
+                          不使用技能
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
 
@@ -2909,10 +3518,10 @@ function Room() {
               </div>
             )}
 
-            {/* 当前警长 👑 */}
+            {/* 当前警长 ⭐ */}
             {sheriffSeat !== null && dayStage !== null && (
               <p className="mt-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-center text-xs font-bold text-amber-300">
-                👑 警长：{sheriffSeat} 号
+                ⭐ 警长：{sheriffSeat} 号
               </p>
             )}
 
@@ -3052,7 +3661,7 @@ function Room() {
             {sheriffElectedInfo !== null && sheriffElectedInfo.seat !== null && (
               <div className="mt-4 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-center">
                 <p className="text-base font-bold text-amber-300">
-                  👑 {sheriffElectedInfo.seat} 号（{sheriffElectedInfo.name ?? ''}）当选警长
+                  ⭐ {sheriffElectedInfo.seat} 号（{sheriffElectedInfo.name ?? ''}）当选警长
                 </p>
                 <p className="mt-0.5 text-xs text-slate-400">正在选择发言顺序…</p>
               </div>
@@ -3120,7 +3729,7 @@ function Room() {
             {sheriffStage === 'death' &&
               (myRole?.seat ?? -1) !== sheriffSeat && (
                 <div className="mt-4 rounded-xl border border-dashed border-slate-700 px-4 py-3 text-center text-sm text-slate-400">
-                  👑 警长出局，正在处理警徽…
+                  ⭐ 警长出局，正在处理警徽…
                 </div>
               )}
 
@@ -3136,7 +3745,7 @@ function Room() {
                 ) : (myRole?.seat ?? -1) === currentSpeaker ? (
                   <>
                     <p className="text-center text-base font-bold text-amber-300">
-                      {currentSpeaker === sheriffSeat ? '👑 ' : ''}你是 {currentSpeaker} 号，轮到你了
+                      {currentSpeaker === sheriffSeat ? '⭐ ' : ''}你是 {currentSpeaker} 号，轮到你了
                     </p>
                     <p className="mt-1 text-center text-sm text-slate-400">
                       发言剩余 {talkRemainSec} 秒
@@ -3155,7 +3764,7 @@ function Room() {
                 ) : (
                   <>
                     <p className="text-center text-base font-bold text-slate-300">
-                      {currentSpeaker === sheriffSeat ? '👑 ' : ''}等待 {currentSpeaker} 号玩家发言
+                      {currentSpeaker === sheriffSeat ? '⭐ ' : ''}等待 {currentSpeaker} 号玩家发言
                     </p>
                     <p className="mt-1 text-center text-sm text-slate-400">
                       {currentSpeaker} 号剩余 {talkRemainSec} 秒
@@ -3179,7 +3788,7 @@ function Room() {
                       }}
                       className="mt-3 w-full rounded-2xl border border-amber-500/60 bg-amber-500/10 py-3 text-base font-bold text-amber-300 transition active:scale-95"
                     >
-                      👑 抢先发言
+                      ⭐ 抢先发言
                     </button>
                   )}
               </div>
@@ -3200,7 +3809,7 @@ function Room() {
                   <>
                     <p className="text-sm text-slate-300">
                       {myRole?.seat === sheriffSeat
-                        ? '👑 你是警长，你的票 = 1.5 票：'
+                        ? '⭐ 你是警长，你的票 = 1.5 票：'
                         : '请投票放逐一名玩家'}
                     </p>
                     <div className="mt-2 grid grid-cols-6 gap-1.5">
@@ -3245,7 +3854,7 @@ function Room() {
                     <p className="text-xs text-slate-400">票数统计</p>
                     {voteTally.map((t) => (
                       <p key={t.seat} className="mt-1 text-sm text-slate-300">
-                        {t.seat}号{t.seat === sheriffSeat ? '（👑警长）' : ''}：{t.count}票
+                        {t.seat}号{t.seat === sheriffSeat ? '（⭐警长）' : ''}：{t.count}票
                       </p>
                     ))}
                   </div>
@@ -3356,20 +3965,17 @@ function Room() {
                   const role = game.deal.find((d) => d.seat === seat)
                   // 阵营动态：咒狐未连=独立；情侣/丘比特随链显示（双好/双狼/人狼/含第三方）
                   let campLabel: string
-                  const cupidAction = game.nightLog.find((a) => a.stepKey === 'cupid')
-                  const lovers = cupidAction?.targets ?? []
+                  // 情侣链跨夜持久化（game.lovers），兜底读当晚记录
+                  const lovers = game.lovers ?? game.nightLog.find((a) => a.stepKey === 'cupid')?.targets ?? []
                   const isLover = lovers.includes(seat)
                   const isCupid = role?.key === 'cupid'
                   if (role?.key === 'lonely_girl') {
-                    // 觉醒孤独少女：阵营实时自动变化（只显示阵营名）
-                    const idolSeat = game.nightLog.find((a) => a.stepKey === 'lonely_girl')?.target
-                    const idolRole = game.deal.find((r) => r.seat === idolSeat)
-                    const idolDead = idolSeat != null && judgeGraveyard.includes(idolSeat)
-                    if (!idolSeat || !idolRole || !idolDead) {
-                      campLabel = '好人'
-                    } else {
-                      campLabel = idolRole.camp === 'wolf' ? '狼人' : idolRole.camp === 'good' ? '好人' : '第三方'
-                    }
+                    // 觉醒孤独少女：偶像被放逐变狼；其他方式出局继承偶像技能；未触发为好人
+                    campLabel = game.lonelyConverted
+                      ? '狼人（变狼）'
+                      : game.lonelyInherited
+                        ? `好人（继承${STEP_NAME_FALLBACK[game.lonelyInherited] ?? game.lonelyInherited}）`
+                        : '好人'
                   } else if (role?.key === 'cursed_fox') {
                     campLabel = lovers.includes(seat) ? '第三方（情侣）' : '独立'
                   } else if (isLover || isCupid) {
@@ -3394,8 +4000,13 @@ function Room() {
                         ? 'text-violet-300'
                         : 'text-emerald-300'
                   // 孤独少女的偶像：卡片上显示 ⭐
-                  const idolSeat = game.nightLog.find((a) => a.stepKey === 'lonely_girl')?.target
+                  // 偶像跨夜持久化（game.lonelyIdol），兜底读当晚记录
+                  const idolSeat = game.lonelyIdol ?? game.nightLog.find((a) => a.stepKey === 'lonely_girl')?.target
                   const isIdol = seat === idolSeat
+                  // 幸运儿：奇迹商人赋予技能的座位
+                  const isLucky = game.luckySeat === seat
+                  // 觉醒狼美人魅惑目标
+                  const isWolfBeautyCharmed = game.wolfBeautyTarget === seat
                   // isLover 已在上方声明（情侣标识）
                   // 夜间技能标记：该座位被谁用了什么技能（狼妃封锁反弹）
                   const wolfQueenTargetSeat = game.nightLog.find((a) => a.stepKey === 'wolf_queen')?.target ?? null
@@ -3442,10 +4053,10 @@ function Room() {
                           : 'border-slate-700 bg-slate-900'
                       }`}
                     >
-                      {/* 右上角：固定标识（⭐崇拜对象、💑情侣） */}
-                      {(isIdol || isLover || sheriffSeat === seat) && (
+                      {/* 右上角：固定标识（⭐崇拜、💑情侣、🎁幸运儿、💫魅惑） */}
+                      {(isIdol || isLover || isLucky || isWolfBeautyCharmed || sheriffSeat === seat) && (
                         <span className="absolute top-0.5 right-1 flex flex-col text-base leading-none">
-                          {sheriffSeat === seat ? '👑' : ''}{isIdol ? '⭐' : ''}{isLover ? '💑' : ''}
+                          {sheriffSeat === seat ? '⭐' : ''}{isLucky ? '🎁' : ''}{isIdol ? '🌟' : ''}{isLover ? '💑' : ''}{isWolfBeautyCharmed ? '💫' : ''}
                         </span>
                       )}
                       {/* 左上角：当晚技能标记 */}
@@ -3491,69 +4102,139 @@ function Room() {
                       </span>
                     ))}
                   </p>
-                  <p className="mt-0.5 text-xs leading-snug text-slate-400">
-                    {currentStep.key === 'demon_hunter' && game.dayCount === 1
-                      ? '第一晚不能使用技能，请直接下一步（第二晚起才可狩猎）'
-                      : JUDGE_STEP_HINTS[currentStep.key] ?? ''}
-                  </p>
-                  {/* 边走边分配：当前角色还没分配座位时，法官临时指定 */}
                   {(() => {
-                    // lovers（情侣确认）不需要分配座位，情侣座位已在丘比特步骤选了
-                    if (currentStep.key === 'lovers') return null
-                    const unusedSeats = seats.filter((s) => !game.deal.some((r) => r.seat === s))
-                    // 狼人集体睁眼：分配所有剩余狼人角色（狼巫、狼王等）
-                    if (currentStep.key === 'werewolf') {
-                      const unassignedWolfRoles = currentBoard.roles.filter(
-                        (r) => r.camp === 'wolf' && !game.deal.some((d) => d.key === r.key)
-                      )
-                      if (unassignedWolfRoles.length === 0) return null
-                      const nextRole = unassignedWolfRoles[0]
-                      return (
-                        <div className="mt-2">
-                          <p className="text-xs font-bold text-amber-300">📋 狼人睁眼！请为【{nextRole.name}】指定座位（还剩 {unassignedWolfRoles.length} 个狼人角色待分配）：</p>
-                          <div className="mt-1.5 grid grid-cols-6 gap-1.5">
-                            {unusedSeats.map((seat) => (
-                              <button
-                                key={seat}
-                                type="button"
-                                onClick={() => setGame((prev) => ({
-                                  ...prev,
-                                  deal: [...prev.deal, { seat, key: nextRole.key, name: nextRole.name, camp: nextRole.camp }],
-                                }))}
-                                className="rounded-lg border border-amber-500/60 bg-amber-500/10 py-2 text-xs font-bold text-amber-200 active:scale-95"
-                              >
-                                {seat}号
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )
+                    // 蚀日侍女吞噬：被吞噬者当晚技能失效（首夜不吞噬），只显示吞噬提示、不显示操作指引
+                    const devourTarget = game.nightLog.find((a) => a.stepKey === 'sun_maid_devour')?.target ?? null
+                    const dhSeats = game.deal.filter((r) => r.key === 'demon_hunter').map((r) => r.seat).sort((a, b) => a - b)
+                    let stepRoleSeat: number | null = null
+                    if (currentStep.key === 'demon_hunter_1') stepRoleSeat = dhSeats[0] ?? null
+                    else if (currentStep.key === 'demon_hunter_2') stepRoleSeat = dhSeats[1] ?? null
+                    else if (currentStep.key === 'sun_maid_use' || currentStep.key === 'sun_maid_devour') stepRoleSeat = game.deal.find((r) => r.key === 'sun_maid')?.seat ?? null
+                    else if (currentStep.key !== 'lovers' && currentStep.key !== 'lucky_guy_receive' && currentStep.key !== 'lucky_guy_use') stepRoleSeat = game.deal.find((r) => r.key === currentStep.key)?.seat ?? null
+                    const devourBlocked = game.dayCount > 1 && devourTarget != null && stepRoleSeat != null && devourTarget === stepRoleSeat
+                    if (devourBlocked) {
+                      return <p className="mt-1.5 rounded-lg bg-amber-500/15 px-2 py-1 text-xs font-bold text-amber-300">⚠️ {devourTarget}号被吞噬，技能禁用</p>
                     }
-                    // 普通角色：分配当前角色座位
-                    const stepSeat = game.deal.find((r) => r.key === currentStep.key)?.seat
-                    if (stepSeat != null) return null
-                    const roleInfo = currentBoard.roles.find((r) => r.key === currentStep.key)
+                    if (currentStep.key === 'wolf_queen' && game.wolfQueenUsed) {
+                      return <p className="mt-1.5 rounded-lg bg-amber-500/15 px-2 py-1 text-xs font-bold text-amber-300">⚠️ 蚀时狼妃技能已失效（仅睁眼空过）</p>
+                    }
+                    // 猎魔人出局：保留流程，仅提示不操作（含当晚被刀未结算）
+                    if (currentStep.key === 'demon_hunter_1' || currentStep.key === 'demon_hunter_2' || currentStep.key === 'demon_hunter') {
+                      const dhSeatsH = game.deal.filter((r) => r.key === 'demon_hunter').map((r) => r.seat).sort((a, b) => a - b)
+                      const dhSeatH = currentStep.key === 'demon_hunter_1' ? dhSeatsH[0] : currentStep.key === 'demon_hunter_2' ? dhSeatsH[1] : dhSeatsH[0] ?? null
+                      if (dhSeatH != null && (judgeGraveyard.includes(dhSeatH) || safeNightLog.some((a) => a.kills && a.target === dhSeatH))) {
+                        return <p className="mt-1.5 rounded-lg bg-amber-500/20 px-2 py-1 text-xs font-bold text-amber-300">⚠️ 猎魔人（{dhSeatH}号）已出局（保留流程，直接下一步）</p>
+                      }
+                    }
+                    // 情侣确认：高亮显示两个情侣号码
+                    if (currentStep.key === 'lovers') {
+                      const loversTargets = game.lovers ?? game.nightLog.find((a) => a.stepKey === 'cupid')?.targets ?? []
+                      if (loversTargets.length >= 2) {
+                        return <p className="mt-1.5 rounded-lg bg-pink-500/20 px-2 py-1.5 text-sm font-black text-pink-300">❤️ 情侣：{loversTargets.join('号、')}号（请两人互相确认号码）</p>
+                      }
+                    }
+                    // 角色专属高亮提醒卡（沙龙之夜风格，所有板子统一）
+                    const roleHighlight: Record<string, { text: string; cls: string }> = {
+                      nightmare: { text: '😈 噩梦之影请睁眼：选择 1 名玩家恐惧（被恐者当晚不能行动；恐惧狼人则狼队空刀，不能连续两晚恐同一人）', cls: 'bg-rose-500/15 text-rose-300' },
+                      seer: { text: '🔮 预言家请睁眼：查验 1 名玩家身份', cls: 'bg-sky-500/15 text-sky-300' },
+                      raven: { text: '🐦 乌鸦请睁眼：诅咒 1 名玩家（白天禁言禁投）', cls: 'bg-sky-500/15 text-sky-300' },
+                      cupid: { text: '❤️ 丘比特请睁眼：连接 2 名玩家为情侣（可自连）', cls: 'bg-pink-500/15 text-pink-300' },
+                      lonely_girl: {
+                        text: game.dayCount > 1 || game.lonelyIdol != null
+                          ? game.lonelyConverted
+                            ? '🌟 觉醒孤独少女已变狼人（加入狼队，参与刀人）'
+                            : game.lonelyInherited
+                              ? `🌟 觉醒孤独少女已继承偶像技能：${STEP_NAME_FALLBACK[game.lonelyInherited] ?? game.lonelyInherited}`
+                              : '🌟 觉醒孤独少女睁眼确认（偶像仍在，尚未触发）'
+                          : '🌟 觉醒孤独少女请睁眼：选择 1 名玩家作为偶像（不能选自己）',
+                        cls: 'bg-pink-500/15 text-pink-300',
+                      },
+                      dream_weaver: { text: '💤 摄梦人请睁眼：选择 1 名玩家梦游（梦游者免疫夜间伤害；连续两晚梦游则第二晚出局）', cls: 'bg-sky-500/15 text-sky-300' },
+                      hunter: { text: '🔫 猎人请睁眼确认（白天被放逐或夜间被刀后可开枪）', cls: 'bg-sky-500/15 text-sky-300' },
+                      wolf_king: { text: '👑 狼王请睁眼确认（同猎人）', cls: 'bg-rose-500/15 text-rose-300' },
+                      wolf_witch: { text: '🧙 狼巫请睁眼：查验 1 名玩家具体身份', cls: 'bg-rose-500/15 text-rose-300' },
+                      demon_hunter: { text: '🏹 猎魔人请睁眼：选择 1 名玩家狩猎（狩猎好人也会出局）', cls: 'bg-sky-500/15 text-sky-300' },
+                      demon_hunter_1: { text: '🏹 猎魔人1请睁眼：选择 1 名玩家狩猎', cls: 'bg-sky-500/15 text-sky-300' },
+                      demon_hunter_2: { text: '🏹 猎魔人2请睁眼：选择 1 名玩家狩猎', cls: 'bg-sky-500/15 text-sky-300' },
+                      wolf_queen: { text: '🛡 蚀时狼妃请睁眼：封锁 1 名玩家（当晚好人阵营对封锁目标释放的查验/毒药/守护，视为对施法好人自身释放；技能生效后永久失效）', cls: 'bg-rose-500/15 text-rose-300' },
+                      werewolf: { text: '🐺 狼人请睁眼：统一意见后选择刀人目标', cls: 'bg-rose-500/15 text-rose-300' },
+                      awake_wolf_beauty: { text: '🌹 觉醒狼美人请睁眼：魅惑 1 名玩家（不能选自己）', cls: 'bg-rose-500/15 text-rose-300' },
+                      witch: { text: '🧪 女巫请睁眼：决定是否使用药水', cls: 'bg-sky-500/15 text-sky-300' },
+                      awake_seer: { text: '🔍 觉醒预言家请睁眼：查验 2 名玩家', cls: 'bg-sky-500/15 text-sky-300' },
+                      mirror_girl: { text: '🔮 魔镜少女请睁眼：查验 1 名玩家具体身份', cls: 'bg-sky-500/15 text-sky-300' },
+                      sun_maid_devour: { text: '🌞 蚀日侍女请睁眼：选择 1 名非狼人玩家吞噬', cls: 'bg-rose-500/15 text-rose-300' },
+                      sun_maid_use: { text: '🌞 蚀日侍女请睁眼：决定是否使用吞噬的技能', cls: 'bg-rose-500/15 text-rose-300' },
+                      miracle_merchant: { text: '✨ 奇迹商人请睁眼：选择技能与幸运儿', cls: 'bg-sky-500/15 text-sky-300' },
+                      lucky_guy_receive: { text: '🎁 幸运儿请睁眼：接收奇迹商人技能', cls: 'bg-sky-500/15 text-sky-300' },
+                      lucky_guy_use: { text: '🎁 幸运儿请睁眼：使用技能或选择不使用', cls: 'bg-sky-500/15 text-sky-300' },
+                    }
+                    const rh = roleHighlight[currentStep.key]
+                    if (rh != null && !(currentStep.key === 'sun_maid_devour' && game.dayCount === 1)) {
+                      const firstNightText = (currentStep.key === 'demon_hunter' || currentStep.key === 'demon_hunter_1' || currentStep.key === 'demon_hunter_2') && game.dayCount === 1
+                        ? '🏹 猎魔人请睁眼（首夜只确认座位，第二晚起才可狩猎）'
+                        : rh.text
+                      return <p className={'mt-1.5 rounded-lg px-2 py-1.5 text-xs font-bold ' + rh.cls}>{firstNightText}</p>
+                    }
+                    return (
+                      <p className="mt-0.5 text-xs leading-snug text-slate-400">
+                        {currentStep.key === 'demon_hunter' && game.dayCount === 1
+                          ? '第一晚不能使用技能，请直接下一步（第二晚起才可狩猎）'
+                          : JUDGE_STEP_HINTS[currentStep.key] ?? ''}
+                      </p>
+                    )
+                  })()}
+                  {/* 幸运儿提示：仅幸运儿使用技能步骤显示 */}
+                  {currentStep.key === 'lucky_guy_use' && game.luckySeat != null && game.luckySkill != null && (() => {
+                    const sn = game.luckySkill === 'check' ? '查验' : game.luckySkill === 'poison' ? '毒药' : '守护'
+                    return (
+                      <p className="mt-1.5 rounded-lg bg-purple-500/15 px-2 py-1 text-[11px] font-bold text-purple-300">
+                        🎁 幸运儿：{game.luckySeat}号　技能：{sn}{game.luckySkillUsed ? '（已使用）' : ''}
+                      </p>
+                    )
+                  })()}
+
+                  {/* 边走边分配：当前阶段需要的角色还没分配座位时，法官临时指定（狼人环节两个角色一并分配） */}
+                  {(() => {
+                    const reqs = currentStep.key === 'werewolf' ? getWolfPackReqs(currentBoard) : getStepRoleReqs(currentStep.key)
+                    if (reqs === null) return null
+                    const pending = reqs.filter((req) => {
+                      if (!currentBoard.roles.some((r) => r.key === req.roleKey)) return false
+                      const assignedCount = game.deal.filter((r) => r.key === req.roleKey).length
+                      return assignedCount < req.count
+                    })
+                    if (pending.length === 0) return null
+                    const unusedSeats = seats.filter((s) => !game.deal.some((r) => r.seat === s))
                     return (
                       <div className="mt-2">
-                        <p className="text-xs font-bold text-amber-300">📋 请为【{currentStep.name}】指定座位：</p>
-                        <div className="mt-1.5 grid grid-cols-6 gap-1.5">
-                          {unusedSeats.map((seat) => (
-                            <button
-                              key={seat}
-                              type="button"
-                              onClick={() => setGame((prev) => ({
-                                ...prev,
-                                deal: [...prev.deal, { seat, key: currentStep.key, name: roleInfo?.name ?? currentStep.name, camp: roleInfo?.camp ?? 'good' }],
-                              }))}
-                              className="rounded-lg border border-amber-500/60 bg-amber-500/10 py-2 text-xs font-bold text-amber-200 active:scale-95"
-                            >
-                              {seat}号
-                            </button>
-                          ))}
-                        </div>
+                        {pending.map((req) => {
+                          const roleInfo = currentBoard.roles.find((r) => r.key === req.roleKey)
+                          const roleDisplay = roleInfo?.name ?? currentStep.name
+                          const assignedCount = game.deal.filter((r) => r.key === req.roleKey).length
+                          return (
+                            <div key={req.roleKey} className="mt-1.5">
+                              <p className="text-xs font-bold text-amber-300">📋 请为【{roleDisplay}】指定座位（还需 {req.count - assignedCount} 个）：</p>
+                              <div className="mt-1 grid grid-cols-6 gap-1.5">
+                                {unusedSeats.map((seat) => (
+                                  <button
+                                    key={seat}
+                                    type="button"
+                                    onClick={() => setGame((prev) => {
+                                      const newDeal = [...prev.deal, { seat, key: req.roleKey, name: roleDisplay, camp: roleInfo?.camp ?? 'good' }]
+                                      return { ...prev, deal: newDeal }
+                                    })}
+                                    className="rounded-lg border border-amber-500/60 bg-amber-500/10 py-2 text-xs font-bold text-amber-200 active:scale-95"
+                                  >
+                                    {seat}号
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )
+                        })}
                       </div>
                     )
                   })()}
+
                   {/* 噩梦之影恐惧：被恐惧角色禁用操作，提示法官跳过 */}
                   {(() => {
                     const nightmareTarget = game.nightLog.find((a) => a.stepKey === 'nightmare')?.target
@@ -3580,49 +4261,501 @@ function Room() {
                     return null
                   })()}
 
-                  {currentStep.key === 'witch' && witchChoice === null && (<>
+                  {/* 狼人环节：觉醒狼美人魅惑目标（座位随狼人一并分配，行动一并选择） */}
+                  {currentStep.key === 'werewolf' && (() => {
+                    const wbSeat = game.deal.find((r) => r.key === 'awake_wolf_beauty')?.seat ?? null
+                    const hasWolfBeauty = currentBoard.roles.some((r) => r.key === 'awake_wolf_beauty')
+                    if (wbSeat == null && hasWolfBeauty) {
+                      return <p className="mt-2 rounded-lg bg-slate-900 px-2 py-1.5 text-xs font-bold text-slate-400">🌹 觉醒狼美人座位未分配，请先在上方指定座位</p>
+                    }
+                    if (wbSeat == null) return null
+                    const wbAlive = !judgeGraveyard.includes(wbSeat)
+                    if (!wbAlive) {
+                      return <p className="mt-2 rounded-lg bg-slate-900 px-2 py-1.5 text-xs font-bold text-slate-400">🌹 觉醒狼美人（{wbSeat}号）已出局，无需魅惑</p>
+                    }
+                    if (game.wolfBeautyUsed) {
+                      return <p className="mt-1.5 rounded-lg bg-amber-500/15 px-2 py-1 text-xs font-bold text-amber-300">⚠️ 觉醒狼美人技能已失效（仅睁眼空过）</p>
+                    }
+                    return (
+                      <div className="mt-2">
+                        <p className="text-xs font-bold text-purple-300">🌹 觉醒狼美人魅惑目标（与刀人一并选择，不能选自己）：</p>
+                        <div className="mt-1 grid grid-cols-6 gap-1.5">
+                          {seats.filter((st) => !judgeGraveyard.includes(st) && st !== wbSeat).map((st) => {
+                            const sel = wolfBeautyTarget === st
+                            return (
+                              <button
+                                key={st}
+                                type="button"
+                                onClick={() => setWolfBeautyTarget(wolfBeautyTarget === st ? null : st)}
+                                className={`rounded-lg py-2 text-xs font-bold active:scale-95 ${
+                                  sel
+                                    ? getCampCls(game, currentStep.key).sel
+                                    : getCampCls(game, currentStep.key).un
+                                }`}
+                              >
+                                {st}号
+                              </button>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )
+                  })()}
+
+                  {/* 觉醒狼美人步骤：已随狼人环节选择 -> 确认提示；未合并（兜底）-> 通用选号 */}
+                  {currentStep.key === 'awake_wolf_beauty' && game.wolfBeautyTarget != null && (() => {
+                    const wbSeat = game.deal.find((r) => r.key === 'awake_wolf_beauty')?.seat ?? null
+                    const wbAlive = wbSeat != null && !judgeGraveyard.includes(wbSeat)
+                    if (!wbAlive || game.wolfBeautyUsed) return null
+                    return (
+                      <p className="mt-2 rounded-lg bg-purple-500/15 px-2 py-1.5 text-xs font-bold text-purple-300">
+                        ✅ 觉醒狼美人魅惑目标：{game.wolfBeautyTarget}号（已在狼人环节一并选择，点下一步确认）
+                      </p>
+                    )
+                  })()}
+
+                  {/* 奇迹商人：技能三选一 + 幸运儿号码，同屏显示 */}
+                  {currentStep.key === 'miracle_merchant' && !isFearedStep && (() => {
+                    const merchantSeat = game.deal.find((r) => r.key === 'miracle_merchant')?.seat ?? null
+                    const skillName = luckySkill === 'check' ? '查验' : luckySkill === 'poison' ? '毒药' : '守护'
+                    return (
+                    <div className="mt-2">
+                      <p className="text-xs font-bold text-purple-300">✨ 奇迹商人请睁眼：先选技能，再选幸运儿号码（不能选自己）</p>
+
+                      {/* ① 技能三选一 */}
+                      <p className="mt-2 text-[11px] text-slate-500">① 选择要赋予的一次性技能（三选一）：</p>
+                      <div className="mt-1 grid grid-cols-3 gap-1.5">
+                        {([
+                          { key: 'check', name: '查验', cls: 'bg-amber-500' },
+                          { key: 'poison', name: '毒药', cls: 'bg-rose-500' },
+                          { key: 'guard', name: '守护', cls: 'bg-emerald-500' },
+                        ] as const).map((sk) => {
+                          const selected = luckySkill === sk.key
+                          const dimmed = luckySkill !== null && !selected
+                          return (
+                            <button
+                              key={sk.key}
+                              type="button"
+                              onClick={() => setLuckySkill(sk.key)}
+                              className={`rounded-lg py-2.5 text-xs font-bold active:scale-95 ${
+                                selected
+                                  ? `${sk.cls} text-slate-950 ring-2 ring-white/70`
+                                  : dimmed
+                                    ? 'bg-slate-800 text-slate-600 opacity-40'
+                                    : `${sk.cls} text-slate-950`
+                              }`}
+                            >
+                              {sk.name}
+                            </button>
+                          )
+                        })}
+                      </div>
+
+                      {/* ② 幸运儿号码（排除自己、死者） */}
+                      <p className="mt-2 text-[11px] text-slate-500">② 选择幸运儿（不能选自己）：</p>
+                      <div className="mt-1 grid grid-cols-6 gap-1.5">
+                        {seats
+                          .filter((st) => !judgeGraveyard.includes(st))
+                          .map((seat) => {
+                            const isSelf = seat === merchantSeat
+                            const selected = luckySeat === seat
+                            return (
+                              <button
+                                key={seat}
+                                type="button"
+                                disabled={isSelf}
+                                onClick={() => setLuckySeat(seat)}
+                                className={`rounded-lg py-2 text-xs font-bold active:scale-95 ${
+                                  isSelf
+                                    ? 'border border-slate-800 bg-slate-900 text-slate-600 opacity-40'
+                                    : selected
+                                      ? getCampCls(game, currentStep.key).sel
+                                      : getCampCls(game, currentStep.key).un
+                                }`}
+                              >
+                                {seat}号
+                              </button>
+                            )
+                          })}
+                      </div>
+
+                      {luckySeat != null && luckySkill != null && (
+                        <p className="mt-2 rounded-lg bg-purple-500/15 px-2 py-1.5 text-xs font-bold text-purple-300">
+                          ✅ 幸运儿：{luckySeat}号，技能：{skillName}（点下一步确认；若幸运儿是狼人，技能作废且你次日出局）
+                        </p>
+                      )}
+                    </div>
+                    )
+                  })()}
+
+                  {/* 幸运儿接收技能告知（第一晚，仅告知不使用） */}
+                  {currentStep.key === 'lucky_guy_receive' && (() => {
+                    const lSeat = game.luckySeat ?? null
+                    const lSkill = game.luckySkill ?? null
+                    if (lSeat == null || lSkill == null) {
+                      return <p className="mt-2 rounded-lg bg-slate-900 px-2 py-1.5 text-xs font-bold text-slate-400">🎁 幸运儿请睁眼，本局无幸运儿，无需行动</p>
+                    }
+                    const sn = lSkill === 'check' ? '查验' : lSkill === 'poison' ? '毒药' : '守护'
+                    return (
+                      <div className="mt-2 rounded-lg bg-purple-500/15 px-2 py-1.5">
+                        <p className="text-xs font-bold text-purple-300">🎁 幸运儿（{lSeat}号）请睁眼</p>
+                        <p className="mt-1 text-[11px] text-purple-200">你获得一次性技能【{sn}】。今晚后期「幸运儿·使用技能」阶段再决定是否使用。</p>
+                      </div>
+                    )
+                  })()}
+
+                  {/* 蚀日侍女吞噬目标选择（首夜只睁眼不行动） */}
+                  {currentStep.key === 'sun_maid_devour' && !isFearedStep && (
+                    <div className="mt-2">
+                      {game.dayCount === 1 ? (
+                        <p className="rounded-lg bg-slate-900 px-2 py-1.5 text-xs font-bold text-rose-300">🌞 蚀日侍女睁眼（首夜只确认座位，不行动，点下一步）</p>
+                      ) : (
+                        <>
+                          <p className="text-xs font-bold text-rose-300">🌞 蚀日侍女请睁眼，选择一名非狼人玩家吞噬</p>
+                          <p className="mt-1 text-[11px] text-slate-500">技能说明：获得并当晚使用该玩家的技能，被吞噬者当晚失去技能</p>
+                          {nightTargets[0] != null && (() => {
+                            const targetRole = game.deal.find((r) => r.seat === nightTargets[0])
+                            if (!targetRole) return null
+                            const sk = SUN_MAID_SKILL_MAP[targetRole.key] ?? null
+                            const sn = sk ? SUN_MAID_SKILL_NAMES[sk] : targetRole.name
+                            return <p className="mt-1 rounded-lg bg-rose-500/10 px-2 py-1 text-xs font-bold text-rose-300">吞噬 {nightTargets[0]}号：获得【{sn}】技能</p>
+                          })()}
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 蚀日侍女使用吞噬技能 */}
+                  {currentStep.key === 'sun_maid_use' && !isFearedStep && (
+                    <div className="mt-2">
+                      <p className="text-xs font-bold text-rose-300">🌞 蚀日侍女请睁眼，决定是否使用吞噬的技能</p>
+                      {(() => {
+                        const skill = getSunMaidSkill(game)
+                        if (skill == null) return <p className="mt-1 text-[11px] text-slate-500">本晚未吞噬到技能（可直接跳过）</p>
+                        const sn = SUN_MAID_SKILL_NAMES[skill] ?? skill
+                        const need2 = skill === 'check2'
+                        const sunSeat = game.deal.find((r) => r.key === 'sun_maid')?.seat ?? null
+                        return (
+                          <>
+                            <p className="mt-1 text-[11px] text-slate-500">本晚吞噬获得【{sn}】技能{need2 ? '（查验 2 人）' : ''}</p>
+                            {skill === 'poison' && (
+                              <p className="mt-1 rounded-lg bg-purple-500/10 px-2 py-1 text-[11px] font-bold text-purple-300">
+                                🍷 女巫药水存量：解药 x{game.witchAntidoteCount ?? 1} | 毒药 x{game.witchPoisonCount ?? 1}（蚀日侍女本晚最多使用一瓶）
+                              </p>
+                            )}
+                            <div className="mt-1.5 grid grid-cols-6 gap-1.5">
+                              {seats.filter((st) => !judgeGraveyard.includes(st) && st !== sunSeat).map((st) => {
+                                const sel = nightTargets.includes(st)
+                                return (
+                                  <button
+                                    key={st}
+                                    type="button"
+                                    onClick={() => setNightTargets((prevNt) => sel
+                                      ? prevNt.filter((x) => x !== st)
+                                      : need2
+                                        ? (prevNt.length >= 2 ? prevNt : [...prevNt, st])
+                                        : (prevNt[0] === st ? [] : [st]))}
+                                    className={`rounded-lg py-2 text-xs font-bold active:scale-95 ${
+                                      sel
+                                        ? getCampCls(game, currentStep.key).sel
+                                        : getCampCls(game, currentStep.key).un
+                                    }`}
+                                  >
+                                    {st}号
+                                  </button>
+                                )
+                              })}
+                            </div>
+                            <p className="mt-1 text-[11px] text-slate-500">
+                              {need2
+                                ? (nightTargets.length >= 2 ? `已选 ${nightTargets[0]}号、${nightTargets[1]}号（再点可改选）` : `请选择 2 名玩家查验（${nightTargets.length}/2）`)
+                                : (nightTargets[0] != null ? `已选 ${nightTargets[0]}号（再点可取消）` : '请选择 1 名玩家')}
+                            </p>
+                            {(() => {
+                              const wolfQueenTarget = game.nightLog.find((a) => a.stepKey === 'wolf_queen')?.target ?? null
+                              if (skill === 'check2' && nightTargets.length === 2) {
+                                const hasWolf = nightTargets.some((t) => t !== wolfQueenTarget && game.deal.some((r) => r.seat === t && r.camp === 'wolf'))
+                                return <p className="mt-1 rounded-lg bg-amber-500/10 px-2 py-1 text-xs font-bold text-amber-300">查验结果：{hasWolf ? '有狼人' : '无狼人'}</p>
+                              }
+                              if (skill === 'check' && nightTargets[0] != null) {
+                                const t = nightTargets[0]
+                                const hasWolf = t !== wolfQueenTarget && game.deal.some((r) => r.seat === t && r.camp === 'wolf')
+                                return <p className="mt-1 rounded-lg bg-amber-500/10 px-2 py-1 text-xs font-bold text-amber-300">查验 {t}号：{hasWolf ? '有狼人' : '无狼人'}</p>
+                              }
+                              if (skill === 'identity' && nightTargets[0] != null) {
+                                const t = nightTargets[0]
+                                const tr = game.deal.find((r) => r.seat === t)
+                                if (!tr) return null
+                                const campLabel = tr.camp === 'wolf' ? '狼人' : tr.camp === 'good' ? '好人' : tr.camp === 'third' ? '第三方' : '独立'
+                                return <p className="mt-1 rounded-lg bg-sky-500/10 px-2 py-1 text-xs font-bold text-sky-300">查验 {t}号：{tr.name}（{campLabel}）</p>
+                              }
+                              if (skill === 'curse' && nightTargets[0] != null) {
+                                return <p className="mt-1 rounded-lg bg-amber-500/10 px-2 py-1 text-xs font-bold text-amber-300">已诅咒 {nightTargets[0]}号（本白天禁言）</p>
+                              }
+                              if (skill === 'guard' && nightTargets[0] != null) {
+                                return <p className="mt-1 rounded-lg bg-emerald-500/10 px-2 py-1 text-xs font-bold text-emerald-300">已守护 {nightTargets[0]}号（今晚免疫夜间伤害）</p>
+                              }
+                              if (skill === 'fear' && nightTargets[0] != null) {
+                                return <p className="mt-1 rounded-lg bg-amber-500/10 px-2 py-1 text-xs font-bold text-amber-300">已恐惧 {nightTargets[0]}号（今晚无法使用技能）</p>
+                              }
+                              if (skill === 'block' && nightTargets[0] != null) {
+                                return <p className="mt-1 rounded-lg bg-cyan-500/10 px-2 py-1 text-xs font-bold text-cyan-300">已封锁 {nightTargets[0]}号（当晚好人技能作用该目标，反弹给施法好人自身）</p>
+                              }
+                              if ((skill === 'poison' || skill === 'hunt') && nightTargets[0] != null) {
+                                return <p className="mt-1 rounded-lg bg-rose-500/10 px-2 py-1 text-xs font-bold text-rose-300">{skill === 'poison' ? '毒药' : '狩猎'}目标：{nightTargets[0]}号</p>
+                              }
+                              return null
+                            })()}
+                          </>
+                        )
+                      })()}
+                    </div>
+                  )}
+
+                  {/* 魔镜少女查验 */}
+                  {currentStep.key === 'mirror_girl' && !isFearedStep && (
+                    <div className="mt-2">
+                      <p className="text-xs font-bold text-sky-300">🔮 魔镜少女请睁眼，选择一名玩家查验具体身份</p>
+                      {nightTargets[0] != null && (() => {
+                        const targetRole = game.deal.find((r) => r.seat === nightTargets[0])
+                        if (!targetRole) return null
+                        const campLabel = targetRole.camp === 'wolf' ? '狼人' : targetRole.camp === 'good' ? '好人' : targetRole.camp === 'third' ? '第三方' : '独立'
+                        return <p className="mt-1 rounded-lg bg-sky-500/10 px-2 py-1 text-xs font-bold text-sky-300">查验 {nightTargets[0]}号：{targetRole.name}（{campLabel}）</p>
+                      })()}
+                    </div>
+                  )}
+
+                  {/* 觉醒预言家查验两人 */}
+                  {currentStep.key === 'awake_seer' && !isFearedStep && (
+                    <div className="mt-2">
+                      <p className="text-xs font-bold text-amber-300">🔍 觉醒预言家请睁眼，选择两名玩家查验（只告知是否有狼人）</p>
+                      {nightTargets.length === 2 && (() => {
+                        const wolfQueenTarget = game.nightLog.find((a) => a.stepKey === 'wolf_queen')?.target ?? null
+                        const hasWolf = nightTargets.some((t) => {
+                          if (t === wolfQueenTarget) return false // 狼妃封锁反弹=金水
+                          return game.deal.some((r) => r.seat === t && r.camp === 'wolf')
+                        })
+                        return <p className="mt-1 rounded-lg bg-amber-500/10 px-2 py-1 text-xs font-bold text-amber-300">查验结果：{hasWolf ? '有狼人' : '无狼人'}</p>
+                      })()}
+                    </div>
+                  )}
+
+                  {currentStep.key === 'witch' && !isFearedStep && !(() => {
+                    const devourTarget = game.nightLog.find((a) => a.stepKey === 'sun_maid_devour')?.target ?? null
+                    const witchSeat = game.deal.find((r) => r.key === 'witch')?.seat ?? null
+                    return game.dayCount > 1 && devourTarget != null && witchSeat != null && devourTarget === witchSeat
+                  })() && (witchChoice === null || witchChoice === 'heal' || witchChoice === 'none' || witchChoice === 'poison') && (() => {
+                    const wACount = game.witchAntidoteCount ?? (game.witchAntidoteUsed ? 0 : 1)
+                    const wPCount = game.witchPoisonCount ?? (game.witchPoisonUsed ? 0 : 1)
+                    const noPotion = wACount <= 0 && wPCount <= 0
+                    return (
+                    <>
+                    {wACount > 0 && (
                     <div className="mt-2 rounded-lg bg-slate-900 px-2 py-1.5 text-xs font-bold text-rose-300">
                       {wolfTargetNow != null ? `今晚刀口：${wolfTargetNow}号玩家` : '今晚平安（狼人未刀人）'}
                     </div>
-                    {isSelfKill && (
-                      <p className="mt-1 rounded-lg bg-rose-900/60 px-2 py-1.5 text-xs font-bold text-rose-300">⚠️ 你被刀了，不能自救！只能用毒药或不用药。</p>
                     )}
-                    <div className="mt-2 grid grid-cols-3 gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => setWitchChoice('heal')}
-                        disabled={isSelfKill}
-                        className="rounded-lg bg-emerald-500 py-2 text-xs font-bold text-slate-950 active:scale-95 disabled:opacity-40"
-                      >
-                        解药救人
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setWitchChoice('poison')}
-                        className="rounded-lg bg-rose-500 py-2 text-xs font-bold text-slate-950 active:scale-95"
-                      >
-                        毒药杀人
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setWitchChoice('none')}
-                        className="rounded-lg bg-slate-700 py-2 text-xs font-bold text-slate-100 active:scale-95"
-                      >
-                        不用药
-                      </button>
+                    <div className="mt-1.5 rounded-lg bg-purple-500/10 px-2 py-1 text-[11px] font-bold text-purple-300">
+                      💊 药水存量：解药 x{wACount} | 毒药 x{wPCount}
                     </div>
+                    {witchChoice === 'heal' && (
+                      <p className="mt-1.5 rounded-lg bg-emerald-500/10 px-2 py-1 text-[11px] font-bold text-emerald-300">
+                        ✅ 已选择：解药救活 {wolfTargetNow != null ? `${wolfTargetNow}号` : '无刀口'}（可点下方改选，点"下一步"提交）
+                      </p>
+                    )}
+                    {witchChoice === 'none' && (
+                      <p className="mt-1.5 rounded-lg bg-slate-700/40 px-2 py-1 text-[11px] font-bold text-slate-300">
+                        ✅ 已选择：本轮不用药（可点下方改选，点"下一步"提交）
+                      </p>
+                    )}
+                    {witchChoice === 'poison' && (
+                      <p className="mt-1.5 rounded-lg bg-rose-500/10 px-2 py-1 text-[11px] font-bold text-rose-300">
+                        ✅ 已选择：毒药杀人，请在下方选择毒药目标（可点上方按钮改选）
+                      </p>
+                    )}
+                    {noPotion ? (
+                      <p className="mt-2 rounded-lg bg-slate-800 px-2 py-1.5 text-xs font-bold text-slate-300">本轮不使用任何药水（双药已空）</p>
+                    ) : (
+                      <>
+                      {isSelfKill && (
+                        <p className="mt-1 rounded-lg bg-rose-900/60 px-2 py-1.5 text-xs font-bold text-rose-300">⚠️ 你被刀了，不能自救！只能用毒药或不用药。</p>
+                      )}
+                      <div className="mt-2 grid grid-cols-3 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setWitchChoice('heal')}
+                          disabled={isSelfKill || wACount <= 0}
+                          className={`rounded-lg py-2 text-xs font-bold text-slate-950 active:scale-95 disabled:opacity-40 ${
+                            witchChoice === 'heal' ? 'bg-emerald-500 ring-2 ring-white/70' : 'bg-emerald-500/70'
+                          }`}
+                        >
+                          解药救人{wACount <= 0 ? '（已用）' : witchChoice === 'heal' ? '（已选）' : ''}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setWitchChoice('poison')}
+                          disabled={wPCount <= 0}
+                          className={`rounded-lg py-2 text-xs font-bold text-slate-950 active:scale-95 disabled:opacity-40 ${
+                            witchChoice === 'poison' ? 'bg-rose-500 ring-2 ring-white/70' : 'bg-rose-500/70'
+                          }`}
+                        >
+                          毒药杀人{wPCount <= 0 ? '（已用）' : witchChoice === 'poison' ? '（已选）' : ''}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setWitchChoice('none')}
+                          className={`rounded-lg py-2 text-xs font-bold text-slate-100 active:scale-95 ${
+                            witchChoice === 'none' ? 'bg-slate-500 ring-2 ring-white/70' : 'bg-slate-700'
+                          }`}
+                        >
+                          不用药{witchChoice === 'none' ? '（已选）' : ''}
+                        </button>
+                      </div>
+                      </>
+                    )}
                     </>
-                  )}
+                    )
+                  })()}
 
-                  {((currentStep.needTarget && currentStep.key !== 'witch') ||
-                    (currentStep.key === 'witch' && witchChoice === 'poison')) && (
+                  {/* 幸运儿使用技能阶段（专属面板） */}
+                  {currentStep.key === 'lucky_guy_use' && !isFearedStep && (() => {
+                    const lSeat = game.luckySeat ?? null
+                    const lSkill = game.luckySkill ?? null
+                    const lUsed = game.luckySkillUsed ?? false
+                    const skillName = lSkill === 'check' ? '查验' : lSkill === 'poison' ? '毒药' : '守护'
+                    // 无幸运儿 / 无技能 / 已使用：空过提示
+                    if (lSeat == null || lSkill == null || lUsed) {
+                      return (
+                        <div className="mt-2 rounded-lg bg-slate-900 px-2 py-1.5 text-xs font-bold text-slate-400">
+                          🎁 幸运儿请睁眼，{lSeat == null ? '本局无幸运儿' : '技能已使用'}，无需行动
+                        </div>
+                      )
+                    }
+                    // 查验结果（选目标后实时显示，狼妃反弹=金水）
+                    const checkResult = lSkill === 'check' && luckyTarget != null ? (() => {
+                      const wq = game.nightLog.find((a) => a.stepKey === 'wolf_queen')?.target ?? null
+                      const rebounded = luckyTarget === wq
+                      const isWolf = game.deal.some((r) => r.seat === luckyTarget && r.camp === 'wolf')
+                      return rebounded ? '金水（好人）' : isWolf ? '查杀（狼人）' : '金水（好人）'
+                    })() : null
+                    return (
+                      <div className="mt-2">
+                        <p className="text-xs font-bold text-purple-300">
+                          🎁 你是幸运儿（{lSeat}号），获得一次性技能【{skillName}】，是否使用？
+                        </p>
+                        {/* 决定：使用 / 暂不使用 */}
+                        {luckyUseChoice === null && (
+                          <div className="mt-2 grid grid-cols-2 gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setLuckyUseChoice('use')}
+                              className="rounded-lg bg-purple-500 py-2 text-xs font-bold text-slate-950 active:scale-95"
+                            >
+                              使用技能
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setLuckyUseChoice('skip')}
+                              className="rounded-lg bg-slate-700 py-2 text-xs font-bold text-slate-100 active:scale-95"
+                            >
+                              暂不使用（保留）
+                            </button>
+                          </div>
+                        )}
+                        {/* 选择使用：选目标号码（排除自己、死者） */}
+                        {luckyUseChoice === 'use' && (
+                          <div className="mt-2">
+                            <p className="text-[11px] text-slate-500">
+                              选择【{skillName}】目标（不能选自己）：
+                            </p>
+                            <div className="mt-1.5 grid grid-cols-6 gap-1.5">
+                              {seats
+                                .filter((s) => !judgeGraveyard.includes(s))
+                                .map((s) => {
+                                  const isSelf = s === lSeat
+                                  const selected = luckyTarget === s
+                                  return (
+                                    <button
+                                      key={s}
+                                      type="button"
+                                      disabled={isSelf}
+                                      onClick={() => setLuckyTarget(s)}
+                                      className={`rounded-lg py-2 text-xs font-bold active:scale-95 ${
+                                        isSelf
+                                          ? 'border border-slate-800 bg-slate-900 text-slate-600 opacity-40'
+                                          : selected
+                                            ? getCampCls(game, currentStep.key).sel
+                                            : getCampCls(game, currentStep.key).un
+                                      }`}
+                                    >
+                                      {s}号
+                                    </button>
+                                  )
+                                })}
+                            </div>
+                            {/* 查验结果实时显示 */}
+                            {checkResult != null && (
+                              <p className="mt-1.5 rounded-lg bg-emerald-500/10 px-2 py-1 text-xs font-bold text-emerald-300">
+                                查验 {luckyTarget}号：{checkResult}
+                              </p>
+                            )}
+                            {luckyTarget != null && (
+                              <button
+                                type="button"
+                                onClick={handleNextStep}
+                                className="mt-2 w-full rounded-lg bg-purple-500 py-2 text-xs font-bold text-slate-950 shadow-lg shadow-purple-500/30 active:scale-95"
+                              >
+                                ✅ 提交使用技能{lSkill === 'poison' ? `（毒 ${luckyTarget}号）` : lSkill === 'check' ? `（查验 ${luckyTarget}号）` : `（守护 ${luckyTarget}号）`}
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => { setLuckyUseChoice(null); setLuckyTarget(null) }}
+                              className="mt-1.5 w-full rounded-lg border border-slate-700 py-1.5 text-[11px] font-bold text-slate-300 active:scale-95"
+                            >
+                              返回改选
+                            </button>
+                          </div>
+                        )}
+                        {/* 选择暂不使用 */}
+                        {luckyUseChoice === 'skip' && (
+                          <p className="mt-2 rounded-lg bg-slate-800 px-2 py-1.5 text-xs font-bold text-slate-300">
+                            已选择暂不使用，技能保留到之后夜晚（点下一步继续）
+                          </p>
+                        )}
+                      </div>
+                    )
+                  })()}
+
+                  {(() => {
+                    const devourTarget = game.nightLog.find((a) => a.stepKey === 'sun_maid_devour')?.target ?? null
+                    const dhSeats = game.deal.filter((r) => r.key === 'demon_hunter').map((r) => r.seat).sort((a, b) => a - b)
+                    let stepRoleSeat: number | null = null
+                    if (currentStep.key === 'demon_hunter_1') stepRoleSeat = dhSeats[0] ?? null
+                    else if (currentStep.key === 'demon_hunter_2') stepRoleSeat = dhSeats[1] ?? null
+                    else if (currentStep.key !== 'lovers' && currentStep.key !== 'lucky_guy_receive' && currentStep.key !== 'lucky_guy_use' && currentStep.key !== 'sun_maid_use' && currentStep.key !== 'sun_maid_devour') stepRoleSeat = game.deal.find((r) => r.key === currentStep.key)?.seat ?? null
+                    return game.dayCount > 1 && devourTarget != null && stepRoleSeat != null && devourTarget === stepRoleSeat
+                  })() ? (
+                    null
+                  ) : (
+                  ((isInheritedStep && currentStep.needTarget) ||
+                    (currentStep.needTarget && currentStep.key !== 'witch' && currentStep.key !== 'miracle_merchant' && currentStep.key !== 'sun_maid_use' && !(currentStep.key === 'sun_maid_devour' && game.dayCount === 1) && !(currentStep.key === 'wolf_queen' && game.wolfQueenUsed)) ||
+                    (currentStep.key === 'witch' && witchChoice === 'poison')) &&
+                  (isInheritedStep ||
+                    !(() => {
+                      const dhS = game.deal.filter((r) => r.key === 'demon_hunter').map((r) => r.seat).sort((a, b) => a - b)
+                      const s = currentStep.key === 'demon_hunter_1' ? dhS[0] : currentStep.key === 'demon_hunter_2' ? dhS[1] : null
+                      return s != null && (judgeGraveyard.includes(s) || safeNightLog.some((a) => a.kills && a.target === s))
+                    })()) && (
                     <>
-                      <p className="mt-2 text-[11px] text-slate-500">
-                        {currentStep.key === 'witch'
-                          ? '选择要毒的玩家'
-                          : currentStep.targetCount === 2
-                            ? '依次选 2 名玩家（再点取消）'
-                            : '点击选择目标（再点取消）'}
+                      <p className="mt-2 text-[11px] font-bold text-slate-500">
+                        {isInheritedStep
+                          ? '该角色已出局，由觉醒孤独少女（继承技能）代替操作：'
+                          : currentStep.key === 'witch'
+                            ? '选择要毒的玩家（可点上方按钮改选）'
+                            : currentStep.targetCount === 2
+                              ? '依次选 2 名玩家（再点取消）'
+                              : '点击选择目标（再点取消）'}
                       </p>
                       {/* 预言家查验结果：狼妃封锁反弹=金水；查验狼人座位=查杀，否则=金水 */}
                       {currentStep.key === 'seer' && nightTargets[0] != null && (() => {
@@ -3639,12 +4772,34 @@ function Room() {
                         if (!targetRole) return null
                         return <p className="mt-1 rounded-lg bg-purple-500/10 px-2 py-1 text-xs font-bold text-purple-300">查验 {nightTargets[0]}号：{targetRole.name}</p>
                       })()}
+                      {/* 噩梦之影恐惧结果 */}
+                      {currentStep.key === 'nightmare' && nightTargets[0] != null && (
+                        <p className="mt-1 rounded-lg bg-purple-500/10 px-2 py-1 text-xs font-bold text-purple-300">已恐惧 {nightTargets[0]}号（被恐者当晚不能行动）</p>
+                      )}
+                      {/* 乌鸦诅咒结果 */}
+                      {currentStep.key === 'raven' && nightTargets[0] != null && (
+                        <p className="mt-1 rounded-lg bg-teal-500/10 px-2 py-1 text-xs font-bold text-teal-300">已诅咒 {nightTargets[0]}号（白天禁言禁投）</p>
+                      )}
+                      {/* 丘比特情侣结果 */}
+                      {currentStep.key === 'cupid' && nightTargets.length >= 1 && (
+                        <p className="mt-1 rounded-lg bg-pink-500/10 px-2 py-1 text-xs font-bold text-pink-300">已连情侣：{nightTargets.join('号、')}号</p>
+                      )}
+                      {/* 摄梦人梦游结果 */}
+                      {currentStep.key === 'dream_weaver' && nightTargets[0] != null && (
+                        <p className="mt-1 rounded-lg bg-indigo-500/10 px-2 py-1 text-xs font-bold text-indigo-300">已梦游 {nightTargets[0]}号（免疫夜间伤害）</p>
+                      )}
+                      {/* 孤独少女偶像结果 */}
+                      {currentStep.key === 'lonely_girl' && nightTargets[0] != null && (
+                        <p className="mt-1 rounded-lg bg-amber-500/10 px-2 py-1 text-xs font-bold text-amber-300">已选偶像：{nightTargets[0]}号</p>
+                      )}
 
                       <div className="mt-1 grid grid-cols-6 gap-1.5">
                         {seats
                           .filter((seat) => !judgeGraveyard.includes(seat))
                           .map((seat) => {
                             const selected = nightTargets.includes(seat)
+                            // 号码按钮按当前角色阵营整体配色（狼=红 好=蓝 第三=粉 咒狐=橙）
+                            const campCls = getCampCls(game, currentStep.key)
                             // 摄梦人不能对自己使用技能：摄梦人座位置灰
                             const dreamSeat = game.deal.find((r) => r.key === 'dream_weaver')?.seat
                             const isDreamSelf = currentStep.key === 'dream_weaver' && seat === dreamSeat
@@ -3653,9 +4808,14 @@ function Room() {
                             const isLonelySelf = currentStep.key === 'lonely_girl' && seat === lonelySeat
                             // 噩梦之影不能连续两晚恐惧同一人
                             const isNightmareRepeat = currentStep.key === 'nightmare' && game.prevNightmareTarget === seat
-                            // 狼妃不能连续两晚封锁同一人
-                            const isWolfQueenRepeat = currentStep.key === 'wolf_queen' && game.prevWolfQueenTarget === seat
-                            const isSelf = isDreamSelf || isLonelySelf || isNightmareRepeat || isWolfQueenRepeat
+                            // 觉醒狼美人不能魅惑自己
+                            const isWolfBeautySelf = currentStep.key === 'awake_wolf_beauty' && seat === game.deal.find((r) => r.key === 'awake_wolf_beauty')?.seat
+                            // 蚀日侍女不能吞噬自己
+                            const isSunMaidSelf = currentStep.key === 'sun_maid_devour' && seat === game.deal.find((r) => r.key === 'sun_maid')?.seat
+                            // 乌鸦可诅咒自己，但不能连续两晚诅咒同一人
+                            const isRavenRepeat = currentStep.key === 'raven' && game.prevRavenTarget === seat
+                            // 丘比特可连自己（自连 + 另一名玩家）
+                            const isSelf = isDreamSelf || isLonelySelf || isNightmareRepeat || isWolfBeautySelf || isSunMaidSelf || isRavenRepeat
                             return (
                               <button
                                 key={seat}
@@ -3667,8 +4827,8 @@ function Room() {
                                   isSelf
                                     ? 'border border-slate-800 bg-slate-900 text-slate-600'
                                     : selected
-                                      ? 'bg-amber-500 text-slate-950'
-                                      : 'border border-slate-700 bg-slate-900 text-slate-300'
+                                      ? campCls.sel
+                                      : campCls.un
                                 }`}
                               >
                                 {seat}号
@@ -3677,7 +4837,9 @@ function Room() {
                           })}
                       </div>
                     </>
-                  )}
+                  )
+                  )
+                  }
 
                   <div className="mt-2.5 flex gap-2">
                     {currentStep.canSkip && (
@@ -3695,7 +4857,9 @@ function Room() {
                       disabled={!canNext}
                       className="flex-1 rounded-xl bg-amber-500 py-2.5 text-sm font-bold text-slate-950 shadow-lg shadow-amber-500/30 active:scale-95 disabled:opacity-40"
                     >
-                      {isLastStep ? '天亮了' : '下一步'}
+                      {isLastStep
+                        ? (currentStep.needTarget && nightTargets.length >= currentStep.targetCount ? '提交并天亮' : '天亮了')
+                        : '下一步'}
                     </button>
                   </div>
                   </>
@@ -3738,7 +4902,7 @@ function Room() {
                                     : 'border border-slate-700 bg-slate-900 text-slate-300'
                                 }`}
                               >
-                                👑{seat}号
+                                ⭐{seat}号
                               </button>
                             ))}
                           </div>
